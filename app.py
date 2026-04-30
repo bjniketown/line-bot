@@ -8,6 +8,27 @@ LINE_TOKEN  = os.environ["LINE_TOKEN"]
 LINE_SECRET = os.environ["LINE_SECRET"]
 claude = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_KEY"])
 
+
+def _fetch_qr_code_url():
+    """啟動時從 LINE API 取得官方帳號 QR code 網址"""
+    try:
+        resp = requests.get(
+            "https://api.line.me/v2/bot/info",
+            headers={"Authorization": f"Bearer {LINE_TOKEN}"},
+            timeout=5,
+        )
+        if resp.ok:
+            basic_id = resp.json().get("basicId", "")
+            if basic_id:
+                return f"https://qr-official.line.me/gs/M_{basic_id.lstrip('@')}.png"
+    except Exception:
+        pass
+    return ""
+
+QR_CODE_URL = _fetch_qr_code_url()
+
+SHARE_KEYWORDS = ["分享", "加好友", "好友碼", "qr", "掃碼", "掃描", "推薦朋友", "介紹朋友", "轉介紹"]
+
 SYSTEM_TEXT = """你是「老鄰居豆干絲」的 LINE 客服助理，請用繁體中文、親切友善的語氣回覆客戶。
 
 【品牌基本資訊】
@@ -212,11 +233,11 @@ A: 真空包裝既適合自用也適合送禮，包裝乾淨清爽。目前沒�
 3. 涉及出貨日期確認、庫存等需人工判斷的問題，請回覆：「這部分需由客服確認排程，請稍候，或直撥 04-25882881」
 4. 若問題超出知識範圍，請回覆：「我幫您轉達給客服，請稍候片刻，或直撥 04-25882881」
 5. 不確定的事情不要捏造，告知需由客服確認"""
-6.【禁止回答的範圍】
-- 競爭對手的比較
-- 政治、宗教話題
-- 與老鄰居業務無關的問題
-- 法律、醫療、財務建議"""
+6. 【禁止回答的範圍】
+    - 競爭對手的比較
+    - 政治、宗教話題
+    - 與老鄰居業務無關的問題
+    - 法律、醫療、財務建議"""
 
 histories = {}
 
@@ -226,12 +247,41 @@ def verify(body, sig):
     return hmac.compare_digest(base64.b64encode(h).decode(), sig)
 
 
-def reply(token, text):
+def reply(token, messages):
+    """messages 可以是文字字串，或 LINE message 物件的 list"""
+    if isinstance(messages, str):
+        messages = [{"type": "text", "text": messages}]
     requests.post(
         "https://api.line.me/v2/bot/message/reply",
         headers={"Authorization": f"Bearer {LINE_TOKEN}"},
-        json={"replyToken": token, "messages": [{"type": "text", "text": text}]},
+        json={"replyToken": token, "messages": messages},
     )
+
+
+def is_share_request(text):
+    t = text.lower()
+    return any(kw in t for kw in SHARE_KEYWORDS)
+
+
+def share_messages():
+    """回傳分享好友用的訊息組合（文字 + QR code 圖片）"""
+    msgs = [
+        {
+            "type": "text",
+            "text": (
+                "感謝您願意將老鄰居豆干絲分享給朋友！🧡\n"
+                "請朋友掃描下方 QR Code 加入我們的官方 LINE，\n"
+                "即可訂購或詢問任何問題 😊"
+            ),
+        }
+    ]
+    if QR_CODE_URL:
+        msgs.append({
+            "type": "image",
+            "originalContentUrl": QR_CODE_URL,
+            "previewImageUrl": QR_CODE_URL,
+        })
+    return msgs
 
 
 def ask(uid, msg):
@@ -261,7 +311,13 @@ def webhook():
         abort(400)
     for e in request.json.get("events", []):
         if e["type"] == "message" and e["message"]["type"] == "text":
-            reply(e["replyToken"], ask(e["source"]["userId"], e["message"]["text"]))
+            text  = e["message"]["text"]
+            token = e["replyToken"]
+            uid   = e["source"]["userId"]
+            if is_share_request(text):
+                reply(token, share_messages())
+            else:
+                reply(token, ask(uid, text))
     return "OK"
 
 
