@@ -360,8 +360,10 @@ EXACT_REPLIES = {
 }
 
 # 只要訊息包含以下任一關鍵字，直接回傳對應答案（不呼叫 Claude）
+# 格式：(統計標籤, 關鍵字列表, 回覆內容)
 KEYWORD_RULES = [
-    (["多少錢", "幾元", "幾塊", "定價", "售價", "價格", "price"],
+    ("💰 價格查詢",
+     ["多少錢", "幾元", "幾塊", "定價", "售價", "價格", "price"],
      "老鄰居豆干絲各品項售價：\n"
      "・招牌豆干絲 210g\n"
      "  宅配 70 元（真空）/ 門市 60 元（一般）\n"
@@ -370,7 +372,8 @@ KEYWORD_RULES = [
      "・油潑辣子 250ml → 120 元\n\n"
      "需要試算含運費的總價嗎？告訴我數量就好 😊"),
 
-    (["運費", "免運"],
+    ("🚚 運費免運",
+     ["運費", "免運"],
      "運費規則（每 50 包為一箱）：\n"
      "・整箱（50 的倍數）→ 免運費 🎉\n"
      "・餘數 1–38 包 → 加收 225 元\n"
@@ -380,7 +383,8 @@ KEYWORD_RULES = [
      "訂 89–99 包 → 湊到 100 包更划算！\n\n"
      "需要試算嗎？請告訴我您的數量 😊"),
 
-    (["帳號", "匯款", "轉帳", "付款", "銀行"],
+    ("🏦 付款方式",
+     ["帳號", "匯款", "轉帳", "付款", "銀行"],
      "付款方式：銀行轉帳\n"
      "・銀行代碼：807（永豐銀行）\n"
      "・帳號：16801800434858\n"
@@ -388,7 +392,8 @@ KEYWORD_RULES = [
      "匯款後請在 LINE 回傳末四碼 📲\n"
      "（不支援貨到付款、信用卡、LINE Pay）"),
 
-    (["怎麼訂", "如何訂", "要怎麼", "訂購方式", "下單方式"],
+    ("📋 訂購方式",
+     ["怎麼訂", "如何訂", "要怎麼", "訂購方式", "下單方式"],
      "訂購請提供以下資訊 📋\n"
      "1. 收件人姓名\n"
      "2. 收件地址\n"
@@ -397,7 +402,8 @@ KEYWORD_RULES = [
      "5. 希望出貨日期\n\n"
      "客服確認後會傳送匯款資訊，出貨前完成匯款即可 😊"),
 
-    (["門市", "地址", "在哪", "實體店"],
+    ("📍 門市地址",
+     ["門市", "地址", "在哪", "實體店"],
      "門市資訊：\n"
      "📍 台中市東勢區豐勢路中盛巷24號\n"
      "📞 04-25882881\n\n"
@@ -406,7 +412,8 @@ KEYWORD_RULES = [
      "・週日：08:00–13:30\n"
      "・週四：公休"),
 
-    (["幾天到", "幾天收", "何時到", "多久到", "配送"],
+    ("📦 配送時間",
+     ["幾天到", "幾天收", "何時到", "多久到", "配送"],
      "出貨使用黑貓冷凍宅配（-18°C 全程冷凍）\n"
      "・一般：出貨隔天可收到\n"
      "・繁盛期（年節、雙11）：可能需 1–2 天\n\n"
@@ -467,6 +474,11 @@ def notify_owner(customer_uid, order_summary):
         pass
 
 
+def _track_faq(label: str):
+    """將問題分類計數寫入 Redis Sorted Set（失敗靜默略過，不影響主流程）。"""
+    _redis(["ZINCRBY", "faq_stats", "1", label])
+
+
 def quick_rule_reply(text):
     """打招呼/感謝/關鍵字 → 直接回傳，完全不呼叫 Claude。"""
     t = text.strip()
@@ -478,8 +490,9 @@ def quick_rule_reply(text):
     if len(t) <= 2 and "?" not in t and "？" not in t:
         return "您好！請問有什麼可以幫您的嗎？😊"
     # 關鍵字比對
-    for keywords, reply_text in KEYWORD_RULES:
+    for label, keywords, reply_text in KEYWORD_RULES:
         if any(kw in t for kw in keywords):
+            _track_faq(label)
             return reply_text
     return None
 
@@ -539,10 +552,64 @@ def push_message(uid, messages):
     )
 
 
-def _push_claude_reply(uid, msg):
-    """背景執行：呼叫 Claude，結果用 push message 送出。"""
-    result = ask_with_cache(uid, msg)
-    push_message(uid, result)
+_FAST_TIMEOUT = 1.2  # 秒：在此時間內完成 → 直接 reply（單一訊息）；超時 → 「處理中」+ push
+
+# ── 自動補單提醒 ────────────────────────────────────────────────────────────
+_ORDER_INTENT_RE = re.compile(
+    r'(?:訂|要訂|下單|要買|購買).{0,15}\d+\s*[包罐箱]'
+    r'|\d+\s*[包罐箱].{0,15}(?:訂|要訂|下單|要買|購買)'
+)
+_ADDRESS_RE = re.compile(r'[縣市].{0,30}[區鄉鎮]|[路街巷]\s*\d+\s*號')
+
+def _has_order_intent(text: str) -> bool:
+    return bool(_ORDER_INTENT_RE.search(text))
+
+def _has_address_in_history(uid: str) -> bool:
+    history = get_history(uid)
+    user_text = " ".join(m["content"] for m in history[-8:] if m["role"] == "user")
+    return bool(_ADDRESS_RE.search(user_text))
+
+def _maybe_push_address_reminder(uid: str, msg: str, claude_reply: str):
+    """安全網：客戶有訂購意圖但近期對話沒有地址，且 Claude 也沒問，才補推提醒。"""
+    if not _has_order_intent(msg):
+        return
+    # Claude 的回覆已問地址 → 不重複
+    if "地址" in claude_reply or "收件" in claude_reply:
+        return
+    # 近期對話已提供地址 → 不需提醒
+    if _has_address_in_history(uid):
+        return
+    push_message(
+        uid,
+        "提醒您，完成宅配訂單還需要提供：\n"
+        "・收件人姓名\n"
+        "・收件地址\n"
+        "・聯絡電話\n\n"
+        "提供後客服會立刻為您安排出貨 😊"
+    )
+
+
+def _handle_claude(token, uid, text):
+    """快慢分路：快則直接 reply；超時先回「處理中」再 push 結果。"""
+    result_holder = [None]
+    done = threading.Event()
+
+    def worker():
+        result_holder[0] = ask_with_cache(uid, text)
+        done.set()
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    if done.wait(timeout=_FAST_TIMEOUT):
+        reply(token, result_holder[0])
+        _maybe_push_address_reminder(uid, text, result_holder[0])
+    else:
+        reply(token, "⏳ 稍等一下，我幫您確認中...")
+        def push_when_done():
+            done.wait()
+            push_message(uid, result_holder[0])
+            _maybe_push_address_reminder(uid, text, result_holder[0])
+        threading.Thread(target=push_when_done, daemon=True).start()
 
 
 def register_customer(uid: str):
@@ -675,8 +742,10 @@ def ask_with_cache(uid, msg):
         history.append({"role": "user", "content": msg})
         history.append({"role": "assistant", "content": cached})
         set_history(uid, history[-10:])
+        _track_faq(f"🤖 {key[:35]}")   # 快取命中也統計
         return cached
 
+    _track_faq(f"🤖 {key[:35]}")       # Claude 新問題統計
     clean, is_order = ask(uid, msg)
     if use_cache and not is_order:
         faq_cache[key] = clean
@@ -706,6 +775,19 @@ def webhook():
                 if t == "!customers":
                     count = int(_redis(["SCARD", "customers"]) or len(_local_customers))
                     reply(token, f"📋 目前客戶名單：{count} 位")
+                    continue
+                # 熱門問題統計 Top 10
+                if t == "!stats":
+                    rows = _redis(["ZREVRANGE", "faq_stats", "0", "9", "WITHSCORES"])
+                    if not rows:
+                        reply(token, "尚無統計資料")
+                    else:
+                        lines = ["📊 熱門問題 Top 10\n"]
+                        for i in range(0, len(rows), 2):
+                            label = rows[i]
+                            count = int(float(rows[i + 1]))
+                            lines.append(f"{i//2+1}. {label}  ×{count}")
+                        reply(token, "\n".join(lines))
                     continue
                 # 推播給所有客戶
                 if t.startswith("!broadcast "):
@@ -740,14 +822,13 @@ def webhook():
                 reply(token, rule)
                 continue
 
-            # ── Claude 呼叫 → 先回「處理中」，背景 thread 跑完再 push ────
+            # ── Claude 呼叫 → 快慢分路 ──────────────────────────────────────
             if not _daily_allowed(uid):
                 reply(token, "您今日的詢問次數已達上限，請明天再試，或直撥 04-25882881 😊")
                 continue
-            reply(token, "⏳ 稍等一下，我幫您確認中...")
             threading.Thread(
-                target=_push_claude_reply,
-                args=(uid, text),
+                target=_handle_claude,
+                args=(token, uid, text),
                 daemon=True,
             ).start()
     return "OK"
