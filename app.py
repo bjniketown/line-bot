@@ -1,11 +1,12 @@
-import os, hashlib, hmac, base64, time
+import os, hashlib, hmac, base64, time, re
 from flask import Flask, request, abort
 import anthropic, requests
 
 app = Flask(__name__)
 
-LINE_TOKEN  = os.environ["LINE_TOKEN"]
-LINE_SECRET = os.environ["LINE_SECRET"]
+LINE_TOKEN      = os.environ["LINE_TOKEN"]
+LINE_SECRET     = os.environ["LINE_SECRET"]
+OWNER_LINE_UID  = os.environ.get("OWNER_LINE_UID", "")   # 老闆的 LINE UID，用來推播新訂單
 claude = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_KEY"])
 
 
@@ -259,7 +260,15 @@ A: 真空包裝既適合自用也適合送禮，包裝乾淨清爽。目前沒�
 4. 若問題超出知識範圍，請回覆：「我幫您轉達給客服，請稍候片刻，或直撥 04-25882881」
 5. 不確定的事情不要捏造，告知需由客服確認
 6. 【門市取貨必問】客人詢問門市取貨或自取時，必須主動詢問包裝種類：「請問需要一般包裝（60 元/包）還是真空包裝（70 元/包）呢？」宅配一律為真空包裝，不需詢問。
-7. 【禁止回答的範圍】競爭對手比較、政治宗教話題、與老鄰居業務無關的問題、法律醫療財務建議"""
+7. 【禁止回答的範圍】競爭對手比較、政治宗教話題、與老鄰居業務無關的問題、法律醫療財務建議
+
+【訂單完成標記（系統專用，重要）】
+當客戶在對話中已提供齊全的訂購資訊，包括：
+  收件人姓名、收件地址、聯絡電話、品項與數量、希望出貨日期（五項缺一不可）
+請在你回覆的最後一行加上此標記（不要讓客戶看到）：
+  <<ORDER:姓名|電話|品項簡述>>
+例：<<ORDER:王小明|0912345678|豆干絲30包>>
+若五項資訊不完整，絕對不要加此標記。"""
 
 RATE_LIMIT_SECONDS = 3   # 每位用戶最少間隔秒數，防止惡意洗版
 
@@ -345,6 +354,37 @@ KEYWORD_RULES = [
 
 faq_cache = {}  # 全域問答快取：normalized 問句 → Claude 回答
 
+ORDER_TAG = re.compile(r'<<ORDER:([^>]+)>>', re.IGNORECASE)
+
+
+def extract_order(text):
+    """從 Claude 回應中取出訂單標記，回傳 (乾淨文字, 訂單摘要或 None)。"""
+    m = ORDER_TAG.search(text)
+    if m:
+        return ORDER_TAG.sub("", text).strip(), m.group(1).strip()
+    return text, None
+
+
+def notify_owner(customer_uid, order_summary):
+    """用 Push Message 推播新訂單給老闆。"""
+    if not OWNER_LINE_UID:
+        return
+    msg = (
+        f"🔔 新訂單通知\n\n"
+        f"摘要：{order_summary}\n"
+        f"客戶 LINE UID：\n{customer_uid}\n\n"
+        f"請盡快在 LINE 官方帳號後台聯繫客戶確認訂單 ✅"
+    )
+    try:
+        requests.post(
+            "https://api.line.me/v2/bot/message/push",
+            headers={"Authorization": f"Bearer {LINE_TOKEN}"},
+            json={"to": OWNER_LINE_UID, "messages": [{"type": "text", "text": msg}]},
+            timeout=10,
+        )
+    except Exception:
+        pass
+
 
 def quick_rule_reply(text):
     """打招呼/感謝/關鍵字 → 直接回傳，完全不呼叫 Claude。"""
@@ -411,32 +451,37 @@ def share_messages():
 
 
 def ask(uid, msg):
+    """呼叫 Claude，回傳 (乾淨文字, 是否有訂單)。"""
     histories.setdefault(uid, [])
     histories[uid].append({"role": "user", "content": msg})
     histories[uid] = histories[uid][-10:]
     try:
         r = claude.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=500,
+            max_tokens=600,
             system=[{"type": "text", "text": SYSTEM_TEXT, "cache_control": {"type": "ephemeral"}}],
             messages=histories[uid],
         )
-        ans = r.content[0].text
+        raw = r.content[0].text
     except anthropic.APIStatusError as e:
         histories[uid].pop()
         if "credit" in str(e).lower() or e.status_code == 529:
-            return "很抱歉，服務暫時無法使用，請直撥 04-25882881"
-        return "很抱歉，系統暫時忙碌，請稍後再試或直撥 04-25882881"
+            return "很抱歉，服務暫時無法使用，請直撥 04-25882881", False
+        return "很抱歉，系統暫時忙碌，請稍後再試或直撥 04-25882881", False
     except Exception:
         histories[uid].pop()
-        return "很抱歉，系統暫時忙碌，請稍後再試或直撥 04-25882881"
-    histories[uid].append({"role": "assistant", "content": ans})
-    return ans
+        return "很抱歉，系統暫時忙碌，請稍後再試或直撥 04-25882881", False
+
+    clean, order_info = extract_order(raw)
+    if order_info:
+        notify_owner(uid, order_info)
+
+    histories[uid].append({"role": "assistant", "content": clean})
+    return clean, bool(order_info)
 
 
 def ask_with_cache(uid, msg):
-    """先查快取，命中就省一次 Claude 呼叫；未命中才呼叫並存快取。"""
-    # 帶有上下文指代的短句不適合快取
+    """先查快取省 token；未命中才呼叫 Claude。有訂單的回答不快取。"""
     context_starts = ("那", "這", "剛", "你說", "您說", "之前", "上面")
     use_cache = len(msg) >= 6 and not any(msg.startswith(w) for w in context_starts)
 
@@ -449,10 +494,10 @@ def ask_with_cache(uid, msg):
         histories[uid] = histories[uid][-10:]
         return cached
 
-    ans = ask(uid, msg)
-    if use_cache:
-        faq_cache[key] = ans
-    return ans
+    clean, is_order = ask(uid, msg)
+    if use_cache and not is_order:
+        faq_cache[key] = clean
+    return clean
 
 
 @app.route("/webhook", methods=["POST"])
@@ -464,6 +509,10 @@ def webhook():
             text  = e["message"]["text"]
             token = e["replyToken"]
             uid   = e["source"]["userId"]
+            # 管理員指令：查詢自己的 LINE UID（用於設定 OWNER_LINE_UID 環境變數）
+            if text.strip() == "!myid":
+                reply(token, f"您的 LINE UID：\n{uid}")
+                continue
             now = time.time()
             if now - last_request.get(uid, 0) < RATE_LIMIT_SECONDS:
                 reply(token, "您傳訊息太快了，請稍後再試 😊")
