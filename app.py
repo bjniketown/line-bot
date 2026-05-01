@@ -266,6 +266,107 @@ RATE_LIMIT_SECONDS = 3   # 每位用戶最少間隔秒數，防止惡意洗版
 histories = {}
 last_request = {}   # uid -> 上次呼叫 Claude 的時間戳
 
+# ── 快速規則回覆（完全不呼叫 Claude，省 token）──────────────────────
+EXACT_REPLIES = {
+    "你好": "您好！我是老鄰居豆干絲的客服助理 😊 請問有什麼可以幫您的嗎？",
+    "哈囉": "您好！我是老鄰居豆干絲的客服助理 😊 請問有什麼可以幫您的嗎？",
+    "嗨":   "您好！我是老鄰居豆干絲的客服助理 😊 請問有什麼可以幫您的嗎？",
+    "hi":   "您好！我是老鄰居豆干絲的客服助理 😊 請問有什麼可以幫您的嗎？",
+    "hello":"您好！我是老鄰居豆干絲的客服助理 😊 請問有什麼可以幫您的嗎？",
+    "早安": "早安！請問有什麼可以幫您的嗎？😊",
+    "午安": "午安！請問有什麼可以幫您的嗎？😊",
+    "晚安": "晚安！如有需要歡迎留言，我們會盡快回覆 😊",
+    "謝謝": "不客氣！有需要隨時詢問 😊",
+    "感謝": "不客氣！有需要隨時詢問 😊",
+    "謝啦": "不客氣！有需要隨時詢問 😊",
+    "謝了": "不客氣！有需要隨時詢問 😊",
+    "好":   "好的！如有其他問題歡迎詢問 😊",
+    "ok":   "好的！如有其他問題歡迎詢問 😊",
+    "了解": "好的！如有其他問題歡迎詢問 😊",
+    "收到": "感謝您！如有其他問題歡迎詢問 😊",
+    "再見": "謝謝光臨，歡迎再來！😊",
+    "掰掰": "謝謝光臨，歡迎再來！😊",
+    "bye":  "謝謝光臨，歡迎再來！😊",
+}
+
+# 只要訊息包含以下任一關鍵字，直接回傳對應答案（不呼叫 Claude）
+KEYWORD_RULES = [
+    (["多少錢", "幾元", "幾塊", "定價", "售價", "價格", "price"],
+     "老鄰居豆干絲各品項售價：\n"
+     "・招牌豆干絲 210g\n"
+     "  宅配 70 元（真空）/ 門市 60 元（一般）\n"
+     "・香滷花生 210g → 100 元\n"
+     "・天然昆布 160g → 100 元\n"
+     "・油潑辣子 250ml → 120 元\n\n"
+     "需要試算含運費的總價嗎？告訴我數量就好 😊"),
+
+    (["運費", "免運"],
+     "運費規則（每 50 包為一箱）：\n"
+     "・整箱（50 的倍數）→ 免運費 🎉\n"
+     "・餘數 1–38 包 → 加收 225 元\n"
+     "・餘數 39–49 包 → 加收 290 元\n\n"
+     "小提示：\n"
+     "訂 39–49 包 → 湊到 50 包更划算！\n"
+     "訂 89–99 包 → 湊到 100 包更划算！\n\n"
+     "需要試算嗎？請告訴我您的數量 😊"),
+
+    (["帳號", "匯款", "轉帳", "付款", "銀行"],
+     "付款方式：銀行轉帳\n"
+     "・銀行代碼：807（永豐銀行）\n"
+     "・帳號：16801800434858\n"
+     "・戶名：詹益全\n\n"
+     "匯款後請在 LINE 回傳末四碼 📲\n"
+     "（不支援貨到付款、信用卡、LINE Pay）"),
+
+    (["怎麼訂", "如何訂", "要怎麼", "訂購方式", "下單方式"],
+     "訂購請提供以下資訊 📋\n"
+     "1. 收件人姓名\n"
+     "2. 收件地址\n"
+     "3. 聯絡電話\n"
+     "4. 品項與數量\n"
+     "5. 希望出貨日期\n\n"
+     "客服確認後會傳送匯款資訊，出貨前完成匯款即可 😊"),
+
+    (["門市", "地址", "在哪", "實體店"],
+     "門市資訊：\n"
+     "📍 台中市東勢區豐勢路中盛巷24號\n"
+     "📞 04-25882881\n\n"
+     "營業時間：\n"
+     "・週一至六：08:00–13:30 / 16:00–18:00\n"
+     "・週日：08:00–13:30\n"
+     "・週四：公休"),
+
+    (["幾天到", "幾天收", "何時到", "多久到", "配送"],
+     "出貨使用黑貓冷凍宅配（-18°C 全程冷凍）\n"
+     "・一般：出貨隔天可收到\n"
+     "・繁盛期（年節、雙11）：可能需 1–2 天\n\n"
+     "出貨後客服會在 LINE 提供 12 碼宅配單號 😊"),
+]
+
+faq_cache = {}  # 全域問答快取：normalized 問句 → Claude 回答
+
+
+def quick_rule_reply(text):
+    """打招呼/感謝/關鍵字 → 直接回傳，完全不呼叫 Claude。"""
+    t = text.strip()
+    # 完全比對（不分大小寫）
+    exact = EXACT_REPLIES.get(t) or EXACT_REPLIES.get(t.lower())
+    if exact:
+        return exact
+    # 超短訊息（2字以內且非問句）→ 親切回應
+    if len(t) <= 2 and "?" not in t and "？" not in t:
+        return "您好！請問有什麼可以幫您的嗎？😊"
+    # 關鍵字比對
+    for keywords, reply_text in KEYWORD_RULES:
+        if any(kw in t for kw in keywords):
+            return reply_text
+    return None
+
+
+def cache_key(text):
+    """正規化問句，提高快取命中率。"""
+    return text.strip().lower().replace(" ", "").replace("　", "")
+
 
 def verify(body, sig):
     h = hmac.new(LINE_SECRET.encode(), body, hashlib.sha256).digest()
@@ -313,20 +414,44 @@ def ask(uid, msg):
     histories.setdefault(uid, [])
     histories[uid].append({"role": "user", "content": msg})
     histories[uid] = histories[uid][-10:]
-    r = claude.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=500,
-        system=[
-            {
-                "type": "text",
-                "text": SYSTEM_TEXT,
-                "cache_control": {"type": "ephemeral"},
-            }
-        ],
-        messages=histories[uid],
-    )
-    ans = r.content[0].text
+    try:
+        r = claude.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=500,
+            system=[{"type": "text", "text": SYSTEM_TEXT, "cache_control": {"type": "ephemeral"}}],
+            messages=histories[uid],
+        )
+        ans = r.content[0].text
+    except anthropic.APIStatusError as e:
+        histories[uid].pop()
+        if "credit" in str(e).lower() or e.status_code == 529:
+            return "很抱歉，服務暫時無法使用，請直撥 04-25882881"
+        return "很抱歉，系統暫時忙碌，請稍後再試或直撥 04-25882881"
+    except Exception:
+        histories[uid].pop()
+        return "很抱歉，系統暫時忙碌，請稍後再試或直撥 04-25882881"
     histories[uid].append({"role": "assistant", "content": ans})
+    return ans
+
+
+def ask_with_cache(uid, msg):
+    """先查快取，命中就省一次 Claude 呼叫；未命中才呼叫並存快取。"""
+    # 帶有上下文指代的短句不適合快取
+    context_starts = ("那", "這", "剛", "你說", "您說", "之前", "上面")
+    use_cache = len(msg) >= 6 and not any(msg.startswith(w) for w in context_starts)
+
+    key = cache_key(msg)
+    if use_cache and key in faq_cache:
+        cached = faq_cache[key]
+        histories.setdefault(uid, [])
+        histories[uid].append({"role": "user", "content": msg})
+        histories[uid].append({"role": "assistant", "content": cached})
+        histories[uid] = histories[uid][-10:]
+        return cached
+
+    ans = ask(uid, msg)
+    if use_cache:
+        faq_cache[key] = ans
     return ans
 
 
@@ -347,7 +472,8 @@ def webhook():
             if is_share_request(text):
                 reply(token, share_messages())
             else:
-                reply(token, ask(uid, text))
+                rule = quick_rule_reply(text)
+                reply(token, rule if rule else ask_with_cache(uid, text))
     return "OK"
 
 
