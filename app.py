@@ -1,4 +1,4 @@
-import os, hashlib, hmac, base64
+import os, hashlib, hmac, base64, time
 from flask import Flask, request, abort
 import anthropic, requests
 
@@ -261,7 +261,10 @@ A: 真空包裝既適合自用也適合送禮，包裝乾淨清爽。目前沒�
 6. 【門市取貨必問】客人詢問門市取貨或自取時，必須主動詢問包裝種類：「請問需要一般包裝（60 元/包）還是真空包裝（70 元/包）呢？」宅配一律為真空包裝，不需詢問。
 7. 【禁止回答的範圍】競爭對手比較、政治宗教話題、與老鄰居業務無關的問題、法律醫療財務建議"""
 
+RATE_LIMIT_SECONDS = 3   # 每位用戶最少間隔秒數，防止惡意洗版
+
 histories = {}
+last_request = {}   # uid -> 上次呼叫 Claude 的時間戳
 
 
 def verify(body, sig):
@@ -336,6 +339,11 @@ def webhook():
             text  = e["message"]["text"]
             token = e["replyToken"]
             uid   = e["source"]["userId"]
+            now = time.time()
+            if now - last_request.get(uid, 0) < RATE_LIMIT_SECONDS:
+                reply(token, "您傳訊息太快了，請稍後再試 😊")
+                continue
+            last_request[uid] = now
             if is_share_request(text):
                 reply(token, share_messages())
             else:
