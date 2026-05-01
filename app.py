@@ -637,8 +637,21 @@ def multicast(uids: list, messages):
             pass
 
 
-def broadcast_to_all(text: str) -> int:
-    """推播給所有客戶，回傳實際推播人數。"""
+def build_image_messages(url: str, caption: str = "") -> list:
+    """組合圖片（+ 選填文字說明）的 LINE message list。"""
+    msgs = []
+    if caption:
+        msgs.append({"type": "text", "text": caption})
+    msgs.append({
+        "type": "image",
+        "originalContentUrl": url,
+        "previewImageUrl": url,
+    })
+    return msgs
+
+
+def broadcast_to_all(messages) -> int:
+    """推播給所有客戶，回傳實際推播人數。messages 可以是字串或 LINE message list。"""
     result = _redis(["SMEMBERS", "customers"])
     uids = list(result) if result else list(_local_customers)
     if not uids:
@@ -797,6 +810,25 @@ def webhook():
                     else:
                         threading.Thread(
                             target=lambda m=msg, tk=token: reply(tk, f"✅ 已推播給 {broadcast_to_all(m)} 位客戶"),
+                            daemon=True,
+                        ).start()
+                    continue
+                # 群發圖片（可附文字說明）
+                if t.startswith("!img "):
+                    parts = t[len("!img "):].strip().split(None, 1)
+                    img_url = parts[0] if parts else ""
+                    caption = parts[1] if len(parts) > 1 else ""
+                    if not img_url.startswith("https://"):
+                        reply(token,
+                              "⚠️ 圖片網址必須以 https:// 開頭\n\n"
+                              "建議步驟：\n"
+                              "1. 前往 imgur.com 上傳圖片\n"
+                              "2. 右鍵圖片 → 複製圖片網址\n"
+                              "3. 再傳 !img https://i.imgur.com/xxx.jpg")
+                    else:
+                        msgs = build_image_messages(img_url, caption)
+                        threading.Thread(
+                            target=lambda m=msgs, tk=token: reply(tk, f"✅ 已推播圖片給 {broadcast_to_all(m)} 位客戶"),
                             daemon=True,
                         ).start()
                     continue
