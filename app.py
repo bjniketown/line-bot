@@ -1,4 +1,5 @@
 import os, hashlib, hmac, base64, time, re, json
+from datetime import datetime, timezone, timedelta
 from flask import Flask, request, abort
 import anthropic, requests
 
@@ -54,6 +55,17 @@ def _fetch_qr_code_url():
     return ""
 
 QR_CODE_URL = _fetch_qr_code_url()
+
+# ── 台灣時區日期（注入給 Claude，避免星期/日期算錯）────────────────────
+_TZ_TW    = timezone(timedelta(hours=8))
+_WEEKDAYS = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+
+def current_date_text() -> str:
+    now = datetime.now(_TZ_TW)
+    return (
+        f"現在台灣時間：{now.strftime('%Y年%m月%d日')} "
+        f"{_WEEKDAYS[now.weekday()]} {now.strftime('%H:%M')}"
+    )
 
 SHARE_KEYWORDS = ["分享", "加好友", "好友碼", "qr", "掃碼", "掃描", "推薦朋友", "介紹朋友", "轉介紹"]
 
@@ -486,7 +498,13 @@ def ask(uid, msg):
         r = claude.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=600,
-            system=[{"type": "text", "text": SYSTEM_TEXT, "cache_control": {"type": "ephemeral"}}],
+            system=[
+                # 第一塊：知識庫（長，啟用 cache 省費用）
+                {"type": "text", "text": SYSTEM_TEXT,
+                 "cache_control": {"type": "ephemeral"}},
+                # 第二塊：當下日期時間（短，每次更新，不 cache）
+                {"type": "text", "text": current_date_text()},
+            ],
             messages=history,
         )
         raw = r.content[0].text
