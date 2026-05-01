@@ -1,4 +1,4 @@
-import os, hashlib, hmac, base64, time, re
+import os, hashlib, hmac, base64, time, re, json
 from flask import Flask, request, abort
 import anthropic, requests
 
@@ -6,8 +6,35 @@ app = Flask(__name__)
 
 LINE_TOKEN      = os.environ["LINE_TOKEN"]
 LINE_SECRET     = os.environ["LINE_SECRET"]
-OWNER_LINE_UID  = os.environ.get("OWNER_LINE_UID", "")   # 老闆的 LINE UID，用來推播新訂單
+OWNER_LINE_UID  = os.environ.get("OWNER_LINE_UID", "")
+UPSTASH_URL     = os.environ.get("UPSTASH_URL", "")     # Upstash Redis REST 網址
+UPSTASH_TOKEN   = os.environ.get("UPSTASH_TOKEN", "")   # Upstash Redis token
 claude = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_KEY"])
+
+
+# ── Upstash Redis 對話記憶（跨重啟持久化）────────────────────────────────
+def _redis(command: list):
+    """執行一個 Upstash Redis REST 指令，失敗時靜默回傳 None。"""
+    if not UPSTASH_URL:
+        return None
+    try:
+        r = requests.post(
+            UPSTASH_URL,
+            headers={"Authorization": f"Bearer {UPSTASH_TOKEN}"},
+            json=command,
+            timeout=3,
+        )
+        return r.json().get("result") if r.ok else None
+    except Exception:
+        return None
+
+def get_history(uid: str) -> list:
+    raw = _redis(["GET", f"hist:{uid}"])
+    return json.loads(raw) if raw else []
+
+def set_history(uid: str, history: list):
+    # 每位用戶對話記憶保存 24 小時
+    _redis(["SET", f"hist:{uid}", json.dumps(history, ensure_ascii=False), "EX", 86400])
 
 
 def _fetch_qr_code_url():
@@ -272,8 +299,8 @@ A: 真空包裝既適合自用也適合送禮，包裝乾淨清爽。目前沒�
 
 RATE_LIMIT_SECONDS = 3   # 每位用戶最少間隔秒數，防止惡意洗版
 
-histories = {}
-last_request = {}   # uid -> 上次呼叫 Claude 的時間戳
+# histories 已改用 Upstash Redis（get_history / set_history）
+last_request = {}   # uid -> 上次呼叫時間（重啟清空，rate limit 不影響正常使用）
 
 # ── 快速規則回覆（完全不呼叫 Claude，省 token）──────────────────────
 EXACT_REPLIES = {
@@ -452,31 +479,30 @@ def share_messages():
 
 def ask(uid, msg):
     """呼叫 Claude，回傳 (乾淨文字, 是否有訂單)。"""
-    histories.setdefault(uid, [])
-    histories[uid].append({"role": "user", "content": msg})
-    histories[uid] = histories[uid][-10:]
+    history = get_history(uid)
+    history.append({"role": "user", "content": msg})
+    history = history[-10:]
     try:
         r = claude.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=600,
             system=[{"type": "text", "text": SYSTEM_TEXT, "cache_control": {"type": "ephemeral"}}],
-            messages=histories[uid],
+            messages=history,
         )
         raw = r.content[0].text
     except anthropic.APIStatusError as e:
-        histories[uid].pop()
         if "credit" in str(e).lower() or e.status_code == 529:
             return "很抱歉，服務暫時無法使用，請直撥 04-25882881", False
         return "很抱歉，系統暫時忙碌，請稍後再試或直撥 04-25882881", False
     except Exception:
-        histories[uid].pop()
         return "很抱歉，系統暫時忙碌，請稍後再試或直撥 04-25882881", False
 
     clean, order_info = extract_order(raw)
     if order_info:
         notify_owner(uid, order_info)
 
-    histories[uid].append({"role": "assistant", "content": clean})
+    history.append({"role": "assistant", "content": clean})
+    set_history(uid, history)
     return clean, bool(order_info)
 
 
@@ -488,10 +514,10 @@ def ask_with_cache(uid, msg):
     key = cache_key(msg)
     if use_cache and key in faq_cache:
         cached = faq_cache[key]
-        histories.setdefault(uid, [])
-        histories[uid].append({"role": "user", "content": msg})
-        histories[uid].append({"role": "assistant", "content": cached})
-        histories[uid] = histories[uid][-10:]
+        history = get_history(uid)
+        history.append({"role": "user", "content": msg})
+        history.append({"role": "assistant", "content": cached})
+        set_history(uid, history[-10:])
         return cached
 
     clean, is_order = ask(uid, msg)
