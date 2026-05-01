@@ -1,4 +1,5 @@
-import os, hashlib, hmac, base64, time, re, json
+import os, hashlib, hmac, base64, time, re, json, threading
+from collections import OrderedDict
 from datetime import datetime, timezone, timedelta
 from flask import Flask, request, abort
 import anthropic, requests
@@ -29,12 +30,22 @@ def _redis(command: list):
     except Exception:
         return None
 
+_local_histories: dict = {}   # Redis 失效時的 in-memory fallback
+_local_daily:     dict = {}   # 每日呼叫計數的本地 fallback（key: "dlimit:xxx:YYYY-MM-DD"）
+
 def get_history(uid: str) -> list:
     raw = _redis(["GET", f"hist:{uid}"])
-    return json.loads(raw) if raw else []
+    if raw is not None:
+        try:
+            return json.loads(raw)
+        except Exception:
+            pass
+    # Redis 無回應或解析失敗 → 用本地記憶
+    return _local_histories.get(uid, [])
 
 def set_history(uid: str, history: list):
-    # 每位用戶對話記憶保存 24 小時
+    # 同時寫入 Redis 和本地，Redis 失效時本地仍有記憶
+    _local_histories[uid] = history
     _redis(["SET", f"hist:{uid}", json.dumps(history, ensure_ascii=False), "EX", 86400])
 
 
@@ -66,6 +77,14 @@ def current_date_text() -> str:
         f"現在台灣時間：{now.strftime('%Y年%m月%d日')} "
         f"{_WEEKDAYS[now.weekday()]} {now.strftime('%H:%M')}"
     )
+
+def _today_str() -> str:
+    return datetime.now(_TZ_TW).strftime("%Y-%m-%d")
+
+def _secs_till_midnight() -> int:
+    now      = datetime.now(_TZ_TW)
+    midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return max(60, int((midnight - now).total_seconds()))
 
 SHARE_KEYWORDS = ["分享", "加好友", "好友碼", "qr", "掃碼", "掃描", "推薦朋友", "介紹朋友", "轉介紹"]
 
@@ -309,7 +328,9 @@ A: 真空包裝既適合自用也適合送禮，包裝乾淨清爽。目前沒�
 例：<<ORDER:王小明|0912345678|豆干絲30包>>
 若五項資訊不完整，絕對不要加此標記。"""
 
-RATE_LIMIT_SECONDS = 3   # 每位用戶最少間隔秒數，防止惡意洗版
+RATE_LIMIT_SECONDS      = 3    # 每位用戶最少間隔秒數，防止惡意洗版
+MAX_CLAUDE_PER_USER_DAY = 30   # 每位用戶每天最多呼叫 Claude 次數
+MAX_CLAUDE_GLOBAL_DAY   = 500  # 全局每天最多呼叫 Claude 次數（防爆紅費用爆炸）
 
 # histories 已改用 Upstash Redis（get_history / set_history）
 last_request = {}   # uid -> 上次呼叫時間（重啟清空，rate limit 不影響正常使用）
@@ -391,7 +412,27 @@ KEYWORD_RULES = [
      "出貨後客服會在 LINE 提供 12 碼宅配單號 😊"),
 ]
 
-faq_cache = {}  # 全域問答快取：normalized 問句 → Claude 回答
+class LRUCache:
+    def __init__(self, maxsize=500):
+        self._cache = OrderedDict()
+        self._maxsize = maxsize
+
+    def __contains__(self, key):
+        return key in self._cache
+
+    def __getitem__(self, key):
+        self._cache.move_to_end(key)
+        return self._cache[key]
+
+    def __setitem__(self, key, value):
+        if key in self._cache:
+            self._cache.move_to_end(key)
+        self._cache[key] = value
+        if len(self._cache) > self._maxsize:
+            self._cache.popitem(last=False)
+
+
+faq_cache = LRUCache(maxsize=500)  # 全域問答快取：normalized 問句 → Claude 回答
 
 ORDER_TAG = re.compile(r'<<ORDER:([^>]+)>>', re.IGNORECASE)
 
@@ -447,6 +488,28 @@ def cache_key(text):
     return text.strip().lower().replace(" ", "").replace("　", "")
 
 
+def _daily_allowed(uid: str) -> bool:
+    """檢查今日 Claude 呼叫額度並計數。允許則回 True，超限則回 False。"""
+    today      = _today_str()
+    uid_key    = f"dlimit:{uid}:{today}"
+    global_key = f"dlimit:global:{today}"
+    ttl        = _secs_till_midnight()
+
+    uid_cnt    = int(_redis(["GET", uid_key])    or _local_daily.get(uid_key,    0))
+    global_cnt = int(_redis(["GET", global_key]) or _local_daily.get(global_key, 0))
+
+    if uid_cnt >= MAX_CLAUDE_PER_USER_DAY or global_cnt >= MAX_CLAUDE_GLOBAL_DAY:
+        return False
+
+    new_uid    = uid_cnt + 1
+    new_global = global_cnt + 1
+    _redis(["SET", uid_key,    str(new_uid),    "EX", ttl])
+    _redis(["SET", global_key, str(new_global), "EX", ttl])
+    _local_daily[uid_key]    = new_uid
+    _local_daily[global_key] = new_global
+    return True
+
+
 def verify(body, sig):
     h = hmac.new(LINE_SECRET.encode(), body, hashlib.sha256).digest()
     return hmac.compare_digest(base64.b64encode(h).decode(), sig)
@@ -461,6 +524,24 @@ def reply(token, messages):
         headers={"Authorization": f"Bearer {LINE_TOKEN}"},
         json={"replyToken": token, "messages": messages},
     )
+
+
+def push_message(uid, messages):
+    """Push message：不需要 reply token，可在背景執行。"""
+    if isinstance(messages, str):
+        messages = [{"type": "text", "text": messages}]
+    requests.post(
+        "https://api.line.me/v2/bot/message/push",
+        headers={"Authorization": f"Bearer {LINE_TOKEN}"},
+        json={"to": uid, "messages": messages},
+        timeout=15,
+    )
+
+
+def _push_claude_reply(uid, msg):
+    """背景執行：呼叫 Claude，結果用 push message 送出。"""
+    result = ask_with_cache(uid, msg)
+    push_message(uid, result)
 
 
 def is_share_request(text):
@@ -489,25 +570,47 @@ def share_messages():
     return msgs
 
 
+_MODELS = [
+    "claude-haiku-4-5-20251001",  # 主力：最快最便宜
+    "claude-haiku-4-5",           # fallback 1：舊版 haiku
+    "claude-haiku-3-5-20241022",  # fallback 2：上一代 haiku
+]
+
+def _call_claude(history: list) -> str:
+    """依序嘗試 _MODELS，第一個成功的回傳結果；全部失敗才丟例外。"""
+    system_blocks = [
+        {"type": "text", "text": SYSTEM_TEXT,
+         "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": current_date_text()},
+    ]
+    last_err = None
+    for model in _MODELS:
+        try:
+            r = claude.messages.create(
+                model=model,
+                max_tokens=600,
+                system=system_blocks,
+                messages=history,
+            )
+            return r.content[0].text
+        except anthropic.APIStatusError as e:
+            # 額度不足 / 服務過載 → 不值得再試其他 model
+            if "credit" in str(e).lower() or e.status_code == 529:
+                raise
+            # 404 model not found / 400 bad request → 試下一個
+            last_err = e
+        except Exception as e:
+            last_err = e
+    raise last_err
+
+
 def ask(uid, msg):
     """呼叫 Claude，回傳 (乾淨文字, 是否有訂單)。"""
     history = get_history(uid)
     history.append({"role": "user", "content": msg})
     history = history[-10:]
     try:
-        r = claude.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=600,
-            system=[
-                # 第一塊：知識庫（長，啟用 cache 省費用）
-                {"type": "text", "text": SYSTEM_TEXT,
-                 "cache_control": {"type": "ephemeral"}},
-                # 第二塊：當下日期時間（短，每次更新，不 cache）
-                {"type": "text", "text": current_date_text()},
-            ],
-            messages=history,
-        )
-        raw = r.content[0].text
+        raw = _call_claude(history)
     except anthropic.APIStatusError as e:
         if "credit" in str(e).lower() or e.status_code == 529:
             return "很抱歉，服務暫時無法使用，請直撥 04-25882881", False
@@ -562,11 +665,27 @@ def webhook():
                 reply(token, "您傳訊息太快了，請稍後再試 😊")
                 continue
             last_request[uid] = now
+
+            # ── 快速回覆（不呼叫 Claude）→ 直接 reply，立即送出 ──────────
             if is_share_request(text):
                 reply(token, share_messages())
-            else:
-                rule = quick_rule_reply(text)
-                reply(token, rule if rule else ask_with_cache(uid, text))
+                continue
+
+            rule = quick_rule_reply(text)
+            if rule:
+                reply(token, rule)
+                continue
+
+            # ── Claude 呼叫 → 先回「處理中」，背景 thread 跑完再 push ────
+            if not _daily_allowed(uid):
+                reply(token, "您今日的詢問次數已達上限，請明天再試，或直撥 04-25882881 😊")
+                continue
+            reply(token, "⏳ 稍等一下，我幫您確認中...")
+            threading.Thread(
+                target=_push_claude_reply,
+                args=(uid, text),
+                daemon=True,
+            ).start()
     return "OK"
 
 
