@@ -32,6 +32,7 @@ def _redis(command: list):
 
 _local_histories: dict = {}   # Redis 失效時的 in-memory fallback
 _local_daily:     dict = {}   # 每日呼叫計數的本地 fallback（key: "dlimit:xxx:YYYY-MM-DD"）
+_local_customers: set  = set() # 客戶 UID 名單的本地 fallback
 
 def get_history(uid: str) -> list:
     raw = _redis(["GET", f"hist:{uid}"])
@@ -544,6 +545,41 @@ def _push_claude_reply(uid, msg):
     push_message(uid, result)
 
 
+def register_customer(uid: str):
+    """將用戶 UID 加入客戶名單（Redis SET + 本地 fallback）。老闆本人不列入。"""
+    if uid == OWNER_LINE_UID:
+        return
+    _local_customers.add(uid)
+    _redis(["SADD", "customers", uid])
+
+
+def multicast(uids: list, messages):
+    """LINE Multicast API：一次最多 500 人，超過自動分批。"""
+    if isinstance(messages, str):
+        messages = [{"type": "text", "text": messages}]
+    for i in range(0, len(uids), 500):
+        batch = uids[i:i + 500]
+        try:
+            requests.post(
+                "https://api.line.me/v2/bot/message/multicast",
+                headers={"Authorization": f"Bearer {LINE_TOKEN}"},
+                json={"to": batch, "messages": messages},
+                timeout=30,
+            )
+        except Exception:
+            pass
+
+
+def broadcast_to_all(text: str) -> int:
+    """推播給所有客戶，回傳實際推播人數。"""
+    result = _redis(["SMEMBERS", "customers"])
+    uids = list(result) if result else list(_local_customers)
+    if not uids:
+        return 0
+    multicast(uids, text)
+    return len(uids)
+
+
 def is_share_request(text):
     t = text.lower()
     return any(kw in t for kw in SHARE_KEYWORDS)
@@ -656,10 +692,38 @@ def webhook():
             text  = e["message"]["text"]
             token = e["replyToken"]
             uid   = e["source"]["userId"]
-            # 管理員指令：查詢自己的 LINE UID（用於設定 OWNER_LINE_UID 環境變數）
-            if text.strip() == "!myid":
-                reply(token, f"您的 LINE UID：\n{uid}")
-                continue
+            # ── 自動記錄客戶名單 ─────────────────────────────────────────────
+            register_customer(uid)
+
+            # ── 老闆專用指令（非老闆傳送會當一般訊息處理）────────────────────
+            if uid == OWNER_LINE_UID:
+                t = text.strip()
+                # 查詢自己的 UID
+                if t == "!myid":
+                    reply(token, f"您的 LINE UID：\n{uid}")
+                    continue
+                # 查詢客戶人數
+                if t == "!customers":
+                    count = int(_redis(["SCARD", "customers"]) or len(_local_customers))
+                    reply(token, f"📋 目前客戶名單：{count} 位")
+                    continue
+                # 推播給所有客戶
+                if t.startswith("!broadcast "):
+                    msg = t[len("!broadcast "):].strip()
+                    if not msg:
+                        reply(token, "請輸入推播內容，例如：\n!broadcast 端午節優惠開跑！")
+                    else:
+                        threading.Thread(
+                            target=lambda m=msg, tk=token: reply(tk, f"✅ 已推播給 {broadcast_to_all(m)} 位客戶"),
+                            daemon=True,
+                        ).start()
+                    continue
+            else:
+                # 非老闆：查詢 UID（保留方便新用戶對機器人輸入 !myid 取得自己的 UID）
+                if text.strip() == "!myid":
+                    reply(token, f"您的 LINE UID：\n{uid}")
+                    continue
+
             now = time.time()
             if now - last_request.get(uid, 0) < RATE_LIMIT_SECONDS:
                 reply(token, "您傳訊息太快了，請稍後再試 😊")
