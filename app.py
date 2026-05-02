@@ -559,7 +559,7 @@ def push_message(uid, messages):
         pass
 
 
-_FAST_TIMEOUT = 1.2  # 秒：在此時間內完成 → 直接 reply（單一訊息）；超時 → 「處理中」+ push
+_FAST_TIMEOUT = 20  # 秒：reply token 有效期 30 秒，等 Claude 最長 20 秒用免費 reply；超時才用 push
 
 # ── 自動補單提醒 ────────────────────────────────────────────────────────────
 _ORDER_INTENT_RE = re.compile(
