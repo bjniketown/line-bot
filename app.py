@@ -33,6 +33,7 @@ def _redis(command: list):
 _local_histories: dict = {}   # Redis 失效時的 in-memory fallback
 _local_daily:     dict = {}   # 每日呼叫計數的本地 fallback（key: "dlimit:xxx:YYYY-MM-DD"）
 _local_customers: set  = set() # 客戶 UID 名單的本地 fallback
+_owner_test_mode: set  = set() # 正在測試模式的老闆 UID
 
 def get_history(uid: str) -> list:
     raw = _redis(["GET", f"hist:{uid}"])
@@ -90,6 +91,13 @@ def _secs_till_midnight() -> int:
 SHARE_KEYWORDS = ["分享", "加好友", "好友碼", "qr", "掃碼", "掃描", "推薦朋友", "介紹朋友", "轉介紹"]
 
 SYSTEM_TEXT = """你是「老鄰居豆干絲」的 LINE 客服助理，請用繁體中文、親切友善的語氣回覆客戶。
+
+【特殊身份識別】
+當使用者訊息前綴為「[老闆]」時，表示老闆本人正在直接與你對話（非客人）。此時：
+- 改用輕鬆直接的語氣，不需要客服語氣
+- 可如實說明你目前的功能、知識範圍與限制
+- 若老闆詢問你能否辨識他，回答：「可以！系統已透過您的 LINE UID 確認您是老闆身份 😊」
+當使用者訊息前綴為「[測試]」時，表示老闆正在模擬客人下單，請完全依照正常客服流程回應，不要透露這是測試。
 
 【品牌基本資訊】
 - 店名：老鄰居豆干絲
@@ -954,6 +962,22 @@ def webhook():
                             daemon=True,
                         ).start()
                     continue
+                # 開始模擬客人下單測試
+                if t == "!test":
+                    _owner_test_mode.add(uid)
+                    set_history(uid + ":test", [])   # 清空測試對話記錄
+                    reply(token,
+                          "🧪 測試模式已開啟！\n\n"
+                          "現在請以客人身份與機器人對話，完整模擬下單流程。\n"
+                          "機器人不會知道這是測試，會按正常客服流程處理。\n\n"
+                          "輸入 !testend 結束測試。")
+                    continue
+                # 結束測試模式
+                if t == "!testend":
+                    _owner_test_mode.discard(uid)
+                    set_history(uid + ":test", [])   # 清除測試歷史
+                    reply(token, "✅ 測試模式已結束，回到正常老闆模式。")
+                    continue
             else:
                 # 非老闆：查詢 UID（保留方便新用戶對機器人輸入 !myid 取得自己的 UID）
                 if text.strip() == "!myid":
@@ -966,6 +990,22 @@ def webhook():
                 continue
             last_request[uid] = now
 
+            # ── 老闆身份 / 測試模式判斷 ─────────────────────────────────────
+            is_owner = (uid == OWNER_LINE_UID)
+            in_test  = (uid in _owner_test_mode)
+
+            if is_owner and in_test:
+                # 測試模式：用獨立 UID 當作虛擬客人，訊息加 [測試] 前綴
+                effective_uid  = uid + ":test"
+                effective_text = f"[測試] {text}"
+            elif is_owner:
+                # 老闆直接對話：讓 Claude 知道是老闆
+                effective_uid  = uid
+                effective_text = f"[老闆] {text}"
+            else:
+                effective_uid  = uid
+                effective_text = text
+
             # ── 快速回覆（不呼叫 Claude）→ 直接 reply，立即送出 ──────────
             if is_share_request(text):
                 reply(token, share_messages())
@@ -977,12 +1017,12 @@ def webhook():
                 continue
 
             # ── Claude 呼叫 → 快慢分路 ──────────────────────────────────────
-            if uid != OWNER_LINE_UID and not _daily_allowed(uid):
+            if not is_owner and not _daily_allowed(uid):
                 reply(token, "您今日的詢問次數已達上限，請明天再試，或直撥 04-25882881 😊")
                 continue
             threading.Thread(
                 target=_handle_claude,
-                args=(token, uid, text),
+                args=(token, effective_uid, effective_text),
                 daemon=True,
             ).start()
     return "OK"
