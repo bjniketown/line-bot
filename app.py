@@ -379,6 +379,9 @@ A: 真空包裝既適合自用也適合送禮，包裝乾淨清爽。目前沒�
 Q: 門市有提供餐具嗎？
 A: 很抱歉，門市不提供餐具，請自行準備。
 
+Q: 門市有廁所嗎？可以借廁所嗎？
+A: 很抱歉，門市沒有對外開放的廁所。廁所建置在套房內，基於隱私關係無法外借，還請見諒！附近如有需要可留意公共廁所。
+
 Q: 老鄰居是從什麼時候開始的？
 A: 老鄰居於 2000 年（921 大地震後）在東勢美食街開業。早期除了豆干絲小菜，也販售各式麵食，生意非常好，門口常大排長龍！2020 年疫情期間老闆決定專注豆干絲並擴大宅配服務，把老鄰居的好滋味送到全台各地。
 
@@ -407,12 +410,19 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
 13. 【禁止回答的範圍】競爭對手比較、政治宗教話題、與老鄰居業務無關的問題、法律醫療財務建議
 
 【訂單完成標記（系統專用，重要）】
-當客戶在對話中已提供齊全的訂購資訊，包括：
-  收件人姓名、收件地址、聯絡電話、品項與數量、希望出貨日期（五項缺一不可）
-請在你回覆的最後一行加上此標記（不要讓客戶看到）：
+
+▶ 宅配訂單：當客戶提供以下四項資料（缺一不可），在回覆最後一行加上標記：
+  必要資料：收件人全名、收件地址、聯絡電話、品項與數量
+  （出貨日期不在此，由客服另行確認）
   <<ORDER:姓名|電話|品項簡述>>
-例：<<ORDER:王小明|0912345678|豆干絲30包>>
-若五項資訊不完整，絕對不要加此標記。"""
+  例：<<ORDER:王小明|0912345678|豆干絲30包>>
+
+▶ 門市自取訂單：當客戶提供以下三項資料（缺一不可），在回覆最後一行加上標記：
+  必要資料：貴姓+稱謂（小姐/先生）、聯絡電話、預計取貨時間
+  <<PICKUP:稱謂姓氏|電話|取貨時間|品項簡述>>
+  例：<<PICKUP:王小姐|0912345678|明天上午10點|豆干絲5包一般包裝>>
+
+以上標記不得讓客戶看到，資訊不齊全時絕對不加。"""
 
 RATE_LIMIT_SECONDS      = 1    # 每位用戶最少間隔秒數，防止惡意洗版
 MAX_CLAUDE_PER_USER_DAY = 30   # 每位用戶每天最多呼叫 Claude 次數
@@ -530,26 +540,37 @@ class LRUCache:
 
 faq_cache = LRUCache(maxsize=500)  # 全域問答快取：normalized 問句 → Claude 回答
 
-ORDER_TAG = re.compile(r'<<ORDER:([^>]+)>>', re.IGNORECASE)
+ORDER_TAG  = re.compile(r'<<ORDER:([^>]+)>>',  re.IGNORECASE)
+PICKUP_TAG = re.compile(r'<<PICKUP:([^>]+)>>', re.IGNORECASE)
 
 
 def extract_order(text):
-    """從 Claude 回應中取出訂單標記，回傳 (乾淨文字, 訂單摘要或 None)。"""
+    """從 Claude 回應中取出訂單/取貨標記，回傳 (乾淨文字, 類型, 摘要)。
+    類型：'order'=宅配, 'pickup'=門市自取, None=無標記"""
     m = ORDER_TAG.search(text)
     if m:
-        return ORDER_TAG.sub("", text).strip(), m.group(1).strip()
-    return text, None
+        return ORDER_TAG.sub("", text).strip(), "order", m.group(1).strip()
+    m = PICKUP_TAG.search(text)
+    if m:
+        return PICKUP_TAG.sub("", text).strip(), "pickup", m.group(1).strip()
+    return text, None, None
 
 
-def notify_owner(customer_uid, order_summary):
+def notify_owner(customer_uid, order_type, order_summary):
     """用 Push Message 推播新訂單給老闆。"""
     if not OWNER_LINE_UID:
         return
+    if order_type == "pickup":
+        header = "🏪 門市自取通知"
+        footer = "請確認取貨時間並備料 ✅"
+    else:
+        header = "🔔 宅配新訂單通知"
+        footer = "請盡快確認訂單並安排出貨日期 ✅"
     msg = (
-        f"🔔 新訂單通知\n\n"
+        f"{header}\n\n"
         f"摘要：{order_summary}\n"
         f"客戶 LINE UID：\n{customer_uid}\n\n"
-        f"請盡快在 LINE 官方帳號後台聯繫客戶確認訂單 ✅"
+        f"{footer}"
     )
     try:
         requests.post(
@@ -833,9 +854,9 @@ def ask(uid, msg):
     except Exception:
         return "很抱歉，系統暫時忙碌，請稍後再試或直撥 04-25882881", False
 
-    clean, order_info = extract_order(raw)
+    clean, order_type, order_info = extract_order(raw)
     if order_info:
-        notify_owner(uid, order_info)
+        notify_owner(uid, order_type, order_info)
 
     history.append({"role": "assistant", "content": clean})
     set_history(uid, history)
