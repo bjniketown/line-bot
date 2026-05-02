@@ -329,7 +329,7 @@ A: 真空包裝既適合自用也適合送禮，包裝乾淨清爽。目前沒�
 例：<<ORDER:王小明|0912345678|豆干絲30包>>
 若五項資訊不完整，絕對不要加此標記。"""
 
-RATE_LIMIT_SECONDS      = 3    # 每位用戶最少間隔秒數，防止惡意洗版
+RATE_LIMIT_SECONDS      = 1    # 每位用戶最少間隔秒數，防止惡意洗版
 MAX_CLAUDE_PER_USER_DAY = 30   # 每位用戶每天最多呼叫 Claude 次數
 MAX_CLAUDE_GLOBAL_DAY   = 500  # 全局每天最多呼叫 Claude 次數（防爆紅費用爆炸）
 
@@ -533,23 +533,30 @@ def reply(token, messages):
     """messages 可以是文字字串，或 LINE message 物件的 list"""
     if isinstance(messages, str):
         messages = [{"type": "text", "text": messages}]
-    requests.post(
-        "https://api.line.me/v2/bot/message/reply",
-        headers={"Authorization": f"Bearer {LINE_TOKEN}"},
-        json={"replyToken": token, "messages": messages},
-    )
+    try:
+        requests.post(
+            "https://api.line.me/v2/bot/message/reply",
+            headers={"Authorization": f"Bearer {LINE_TOKEN}"},
+            json={"replyToken": token, "messages": messages},
+            timeout=10,
+        )
+    except Exception:
+        pass
 
 
 def push_message(uid, messages):
     """Push message：不需要 reply token，可在背景執行。"""
     if isinstance(messages, str):
         messages = [{"type": "text", "text": messages}]
-    requests.post(
-        "https://api.line.me/v2/bot/message/push",
-        headers={"Authorization": f"Bearer {LINE_TOKEN}"},
-        json={"to": uid, "messages": messages},
-        timeout=15,
-    )
+    try:
+        requests.post(
+            "https://api.line.me/v2/bot/message/push",
+            headers={"Authorization": f"Bearer {LINE_TOKEN}"},
+            json={"to": uid, "messages": messages},
+            timeout=15,
+        )
+    except Exception:
+        pass
 
 
 _FAST_TIMEOUT = 1.2  # 秒：在此時間內完成 → 直接 reply（單一訊息）；超時 → 「處理中」+ push
@@ -595,8 +602,12 @@ def _handle_claude(token, uid, text):
     done = threading.Event()
 
     def worker():
-        result_holder[0] = ask_with_cache(uid, text)
-        done.set()
+        try:
+            result_holder[0] = ask_with_cache(uid, text)
+        except Exception:
+            result_holder[0] = "很抱歉，系統暫時忙碌，請稍後再試或直撥 04-25882881"
+        finally:
+            done.set()
 
     threading.Thread(target=worker, daemon=True).start()
 
