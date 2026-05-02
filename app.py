@@ -656,7 +656,7 @@ def broadcast_to_all(messages) -> int:
     uids = list(result) if result else list(_local_customers)
     if not uids:
         return 0
-    multicast(uids, text)
+    multicast(uids, messages)
     return len(uids)
 
 
