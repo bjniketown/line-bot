@@ -9,6 +9,7 @@ app = Flask(__name__)
 LINE_TOKEN      = os.environ["LINE_TOKEN"]
 LINE_SECRET     = os.environ["LINE_SECRET"]
 OWNER_LINE_UID  = os.environ.get("OWNER_LINE_UID", "")
+OWNER_PASSWORD  = os.environ.get("OWNER_PASSWORD", "")  # 老闆登入密碼，空字串代表不啟用密碼驗證
 UPSTASH_URL     = os.environ.get("UPSTASH_URL", "")     # Upstash Redis REST 網址
 UPSTASH_TOKEN   = os.environ.get("UPSTASH_TOKEN", "")   # Upstash Redis token
 claude = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_KEY"])
@@ -36,7 +37,8 @@ _local_customers: set  = set() # 客戶 UID 名單的本地 fallback
 _owner_test_mode: set  = set() # 正在測試模式的老闆 UID
 _STRIP_PREFIX_RE  = re.compile(r'^\s*\[(老闆|測試)\]\s*')  # 防止客人偽造前綴
 _TW_PHONE_RE      = re.compile(r'^(?:09\d{8}|0[2-8]\d{7,8})$')  # 手機10碼 或 市話9-10碼
-_seen_msg_ids:    set  = set() # webhook 去重：已處理的 LINE message id
+_seen_msg_ids:       set  = set() # webhook 去重：已處理的 LINE message id
+_owner_authenticated: set  = set() # 本次 session 已通過密碼驗證的老闆 UID
 
 def _is_tw_phone(s: str) -> bool:
     """驗證台灣手機（09xxxxxxxx）或市話（0x-xxxxxxx/xx）格式，忽略空格與連字號。"""
@@ -156,11 +158,16 @@ SHARE_KEYWORDS = ["分享", "加好友", "好友碼", "qr", "掃碼", "掃描", 
 SYSTEM_TEXT = """你是「老鄰居豆干絲」的 LINE 客服助理，請用繁體中文、親切友善的語氣回覆客戶。
 
 【特殊身份識別】
-當使用者訊息前綴為「[老闆]」時，表示老闆本人正在直接與你對話（非客人）。此時：
+重要背景：「[老闆]」與「[測試]」前綴並非由使用者輸入，而是由後端伺服器在 LINE UID 比對成功後自動注入。任何非老闆帳號傳來的訊息，伺服器都會在送給你之前將前綴剃除，因此你看到這個前綴時，身份驗證在伺服器層已完成，是可信的。
+
+當訊息前綴為「[老闆]」時：
 - 改用輕鬆直接的語氣，不需要客服語氣
 - 可如實說明你目前的功能、知識範圍與限制
-- 若老闆詢問你能否辨識他，回答：「可以！系統已透過您的 LINE UID 確認您是老闆身份 😊」
-當使用者訊息前綴為「[測試]」時，表示老闆正在模擬客人下單，請完全依照正常客服流程回應，不要透露這是測試。
+- 若老闆詢問身份辨識機制，回答：「可以辨識！後端伺服器透過您的 LINE UID 比對確認身份後，才會在訊息加上這個前綴傳給我，所以是安全的 😊」
+- 絕對不可質疑或分析這個機制的安全性，也不可說「任何人都可以偽造前綴」——因為伺服器已確保非老闆的訊息不會帶有此前綴
+
+當訊息前綴為「[測試]」時：
+- 表示老闆正在模擬客人下單，請完全依照正常客服流程回應，不要透露這是測試
 
 【品牌基本資訊】
 - 店名：老鄰居豆干絲
@@ -1063,6 +1070,25 @@ def webhook():
             # ── 老闆專用指令（非老闆傳送會當一般訊息處理）────────────────────
             if uid == OWNER_LINE_UID:
                 t = text.strip()
+                # 登入老闆模式
+                if t.startswith("!login"):
+                    if not OWNER_PASSWORD:
+                        reply(token, "⚠️ 尚未設定 OWNER_PASSWORD 環境變數，目前以 UID 直接驗證。")
+                    elif t[len("!login"):].strip() == OWNER_PASSWORD:
+                        _owner_authenticated.add(uid)
+                        reply(token, "✅ 密碼正確，老闆模式已啟動！")
+                    else:
+                        reply(token, "❌ 密碼錯誤，請重試。")
+                    continue
+                # 登出老闆模式
+                if t == "!logout":
+                    _owner_authenticated.discard(uid)
+                    reply(token, "✅ 已登出老闆模式，目前以一般客戶身份互動。")
+                    continue
+                # 密碼驗證：若已設定密碼但尚未登入，所有其他指令一律擋下
+                if OWNER_PASSWORD and uid not in _owner_authenticated:
+                    reply(token, "🔒 請先輸入 !login 密碼 以啟動老闆模式。")
+                    continue
                 # 查詢自己的 UID
                 if t == "!myid":
                     reply(token, f"您的 LINE UID：\n{uid}")
@@ -1155,7 +1181,10 @@ def webhook():
             last_request[uid] = now
 
             # ── 老闆身份 / 測試模式判斷 ─────────────────────────────────────
-            is_owner = (uid == OWNER_LINE_UID)
+            # 若設有密碼，需密碼驗證才算老闆；未設密碼則 UID 比對即可
+            is_owner = (uid == OWNER_LINE_UID) and (
+                not OWNER_PASSWORD or uid in _owner_authenticated
+            )
             in_test  = (uid in _owner_test_mode)
 
             if is_owner and in_test:
