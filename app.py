@@ -57,7 +57,9 @@ def _is_duplicate_event(mid: str) -> bool:
                 return True   # 確認是重複，非 Redis 故障
     return False
 
-_store_closed_msg: str = ""   # 臨時打烊訊息，空字串代表正常營業
+_store_closed_msg:  str  = ""  # 臨時打烊訊息，空字串代表正常營業
+_store_closed_days: int  = 1   # 停單天數：1=當日，>1=連假（宅配也停）
+_dumpling_soldout:  bool = False  # 水餃售完旗標
 
 def get_history(uid: str) -> list:
     raw = _redis(["GET", f"hist:{uid}"])
@@ -119,26 +121,80 @@ def _seconds_until_midnight() -> int:
     midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     return max(60, int((midnight - now).total_seconds()))
 
-def set_store_closed(msg: str):
-    global _store_closed_msg
-    _store_closed_msg = msg
-    _redis(["SET", "store_closed", msg, "EX", _seconds_until_midnight()])
+def set_store_closed(msg: str, days: int = 1):
+    global _store_closed_msg, _store_closed_days
+    _store_closed_msg  = msg
+    _store_closed_days = days
+    ttl = _seconds_until_midnight() if days <= 1 else days * 86400
+    # 格式："{days}:{msg}"，方便 store_status_text 判斷模式
+    _redis(["SET", "store_closed", f"{days}:{msg}", "EX", ttl])
 
 def clear_store_closed():
-    global _store_closed_msg
-    _store_closed_msg = ""
+    global _store_closed_msg, _store_closed_days
+    _store_closed_msg  = ""
+    _store_closed_days = 1
     _redis(["DEL", "store_closed"])
+
+def _parse_store_closed() -> tuple[int, str]:
+    """回傳 (days, msg)，兩者皆空代表未停單。"""
+    if UPSTASH_URL:
+        raw = _redis(["GET", "store_closed"]) or ""
+    else:
+        raw = f"{_store_closed_days}:{_store_closed_msg}" if _store_closed_msg else ""
+    if not raw:
+        return 0, ""
+    if ":" in raw:
+        days_str, msg = raw.split(":", 1)
+        try:
+            return int(days_str), msg
+        except ValueError:
+            pass
+    return 1, raw
 
 def store_status_text() -> str:
     """回傳目前門市狀態，供每次呼叫 Claude 時動態注入。"""
-    msg = _store_closed_msg or (_redis(["GET", "store_closed"]) or "")
-    if msg:
+    days, msg = _parse_store_closed()
+    if not msg:
+        return ""
+    if days > 1:
         return (
-            f"【門市今日臨時公告】{msg}。"
+            f"【連假公告】{msg}。"
             f"處理規則："
-            f"(1) 宅配訂單完全不受影響，照常收單；"
-            f"(2) 客人詢問今日門市自取時，告知今日已結束並婉轉建議改約其他日期；"
-            f"(3) 客人預約未來日期門市自取，照常收單不受影響。"
+            f"(1) 門市與宅配均暫停接單，老闆連假不在，無法出貨；"
+            f"(2) 客人詢問任何訂購（門市或宅配），一律告知連假期間暫停接單，假期結束後恢復；"
+            f"(3) 歡迎客人假期後再來，或現在先告知需求，假期結束後客服會主動跟進。"
+        )
+    return (
+        f"【門市臨時公告】{msg}。"
+        f"處理規則："
+        f"(1) 宅配訂單完全不受影響，照常收單；"
+        f"(2) 客人詢問門市自取時，告知今日門市暫停接單並婉轉建議宅配或改約其他日期；"
+        f"(3) 客人預約未來日期門市自取，照常收單不受影響。"
+    )
+
+def is_holiday_mode() -> bool:
+    """判斷目前是否為連假模式（宅配也停）。"""
+    days, msg = _parse_store_closed()
+    return bool(msg) and days > 1
+
+def set_dumpling_soldout():
+    global _dumpling_soldout
+    _dumpling_soldout = True
+    _redis(["SET", "dumpling_soldout", "1"])
+
+def clear_dumpling_soldout():
+    global _dumpling_soldout
+    _dumpling_soldout = False
+    _redis(["DEL", "dumpling_soldout"])
+
+def dumpling_soldout_text() -> str:
+    """回傳水餃售完狀態，供每次呼叫 Claude 時動態注入。"""
+    sold = _dumpling_soldout or bool(_redis(["GET", "dumpling_soldout"]))
+    if sold:
+        return (
+            "【今日水餃售完】今日水餃已售完。"
+            "客人詢問或訂購水餃時，告知今日水餃已售完，其他品項完全不受影響，"
+            "明日歡迎再訂購。"
         )
     return ""
 
@@ -740,8 +796,12 @@ def _is_open_now() -> tuple[bool, str]:
 def quick_rule_reply(text, uid=None):
     """打招呼/感謝/關鍵字 → 直接回傳，完全不呼叫 Claude。"""
     t = text.strip()
-    # 門市停單：攔截取貨相關關鍵字，避免繞過 Claude 直接回傳錯誤訊息
-    if store_status_text() and any(kw in t for kw in ("自取", "店取", "門市取", "取貨", "來店")):
+    # 連假模式：門市與宅配均停，攔截所有訂購相關關鍵字
+    if is_holiday_mode():
+        if any(kw in t for kw in ("自取", "店取", "門市取", "取貨", "來店", "宅配", "訂購", "下單")):
+            return "非常抱歉，目前連假期間暫停接單 🙏\n假期結束後恢復，歡迎屆時再訂購 😊"
+    # 門市停單（非連假）：只攔截取貨相關，宅配照常
+    elif store_status_text() and any(kw in t for kw in ("自取", "店取", "門市取", "取貨", "來店")):
         return "非常抱歉，今日門市暫停接單 🙏\n宅配照常服務，如需宅配請告知，我為您安排 😊"
     # 完全比對（不分大小寫）
     exact = EXACT_REPLIES.get(t) or EXACT_REPLIES.get(t.lower())
@@ -981,11 +1041,11 @@ _MODELS = [
 
 def _call_claude(history: list) -> str:
     """依序嘗試 _MODELS，第一個成功的回傳結果；全部失敗才丟例外。"""
-    status = store_status_text()
+    extras = [s for s in (store_status_text(), dumpling_soldout_text()) if s]
     system_blocks = [
         {"type": "text", "text": SYSTEM_TEXT,
          "cache_control": {"type": "ephemeral"}},
-        {"type": "text", "text": current_date_text() + (f"\n{status}" if status else "")},
+        {"type": "text", "text": current_date_text() + ("".join(f"\n{s}" for s in extras))},
     ]
     last_err = None
     for model in _MODELS:
@@ -1121,17 +1181,23 @@ def store_admin():
     token  = request.args.get("token", "")
     action = request.args.get("action", "")
     reason = request.args.get("reason", "今日提前售完")
+    days   = int(request.args.get("days", "1"))
 
     if not ADMIN_TOKEN or token != ADMIN_TOKEN:
         abort(403)
 
     if action == "close":
-        set_store_closed(reason)
+        set_store_closed(reason, days)
+        if days <= 1:
+            expire_note = "今日午夜 00:00 自動恢復接單。"
+        else:
+            resume = datetime.now(_TZ_TW) + timedelta(days=days)
+            expire_note = f"預計 {resume.strftime('%m/%d')} 自動恢復接單（共 {days} 天）。"
         return (
             f"<h2>✅ 門市停單已啟動</h2>"
             f"<p>原因：{reason}</p>"
             f"<p>宅配不受影響，照常接單。</p>"
-            f"<p>午夜 00:00 自動恢復。</p>"
+            f"<p>{expire_note}</p>"
             f"<p><a href='/store?token={token}'>← 返回管理頁</a></p>"
         )
     elif action == "open":
@@ -1141,18 +1207,54 @@ def store_admin():
             "<p>門市取貨訂單已恢復正常。</p>"
             f"<p><a href='/store?token={token}'>← 返回管理頁</a></p>"
         )
+    elif action == "dumpling_close":
+        set_dumpling_soldout()
+        return (
+            "<h2>✅ 水餃售完已啟動</h2>"
+            "<p>客人詢問水餃時將告知售完。</p>"
+            "<p>其他品項不受影響，需手動恢復。</p>"
+            f"<p><a href='/store?token={token}'>← 返回管理頁</a></p>"
+        )
+    elif action == "dumpling_open":
+        clear_dumpling_soldout()
+        return (
+            "<h2>✅ 水餃已恢復供應</h2>"
+            f"<p><a href='/store?token={token}'>← 返回管理頁</a></p>"
+        )
     else:
-        current = store_status_text()
-        if current:
-            status_html = "<p style='color:red;font-weight:bold'>🔴 目前門市停單中，宅配照常</p>"
-        else:
-            status_html = "<p style='color:green;font-weight:bold'>🟢 目前正常接單</p>"
+        store_msg  = store_status_text()
+        dump_msg   = dumpling_soldout_text()
+        store_html = (
+            "<p style='color:red;font-weight:bold'>🔴 門市停單中，宅配照常</p>"
+            if store_msg else
+            "<p style='color:green;font-weight:bold'>🟢 門市正常接單</p>"
+        )
+        dump_html = (
+            "<p style='color:orange;font-weight:bold'>🟠 今日水餃售完</p>"
+            if dump_msg else
+            "<p style='color:green;font-weight:bold'>🟢 水餃供應正常</p>"
+        )
         return (
             "<h2>老鄰居門市管理</h2>"
-            f"{status_html}"
-            f"<p><a href='/store?action=close&token={token}&reason=今日提前售完'>🔴 關閉門市接單（今日售完）</a></p>"
-            f"<p><a href='/store?action=close&token={token}&reason=今日臨時公休'>🔴 關閉門市接單（臨時公休）</a></p>"
+            f"{store_html}"
+            f"{dump_html}"
+            "<hr>"
+            "<h3>門市接單</h3>"
+            f"<p><a href='/store?action=close&token={token}&reason=今日提前售完'>🔴 今日提前售完</a></p>"
+            f"<p><a href='/store?action=close&token={token}&reason=今日臨時公休'>🔴 今日臨時公休</a></p>"
+            "<p>🔴 連假停單：</p>"
+            f"<form action='/store' method='get' style='margin:0 0 8px 1em'>"
+            f"<input type='hidden' name='action' value='close'>"
+            f"<input type='hidden' name='token' value='{token}'>"
+            f"<input type='hidden' name='reason' value='連假期間暫停門市'>"
+            f"天數 <input type='number' name='days' value='3' min='1' max='30' style='width:50px'> 天"
+            f"&nbsp;<button type='submit'>確認停單</button>"
+            f"</form>"
             f"<p><a href='/store?action=open&token={token}'>🟢 恢復門市接單</a></p>"
+            "<hr>"
+            "<h3>水餃</h3>"
+            f"<p><a href='/store?action=dumpling_close&token={token}'>🟠 水餃售完（需手動恢復）</a></p>"
+            f"<p><a href='/store?action=dumpling_open&token={token}'>🟢 水餃恢復供應</a></p>"
         )
 
 
