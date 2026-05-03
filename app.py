@@ -35,6 +35,7 @@ _local_daily:     dict = {}   # 每日呼叫計數的本地 fallback（key: "dli
 _local_customers: set  = set() # 客戶 UID 名單的本地 fallback
 _owner_test_mode: set  = set() # 正在測試模式的老闆 UID
 _STRIP_PREFIX_RE  = re.compile(r'^\s*\[(老闆|測試)\]\s*')  # 防止客人偽造前綴
+_store_closed_msg: str = ""   # 臨時打烊訊息，空字串代表正常營業
 
 def get_history(uid: str) -> list:
     raw = _redis(["GET", f"hist:{uid}"])
@@ -80,6 +81,19 @@ def current_date_text() -> str:
         f"現在台灣時間：{now.strftime('%Y年%m月%d日')} "
         f"{_WEEKDAYS[now.weekday()]} {now.strftime('%H:%M')}"
     )
+
+def store_status_text() -> str:
+    """回傳目前門市狀態，供每次呼叫 Claude 時動態注入。"""
+    msg = _store_closed_msg or (_redis(["GET", "store_closed"]) or "")
+    if msg:
+        return (
+            f"【門市今日臨時公告】{msg}。"
+            f"處理規則："
+            f"(1) 宅配訂單完全不受影響，照常收單；"
+            f"(2) 客人詢問今日門市自取時，告知今日已結束並婉轉建議改約其他日期；"
+            f"(3) 客人預約未來日期門市自取，照常收單不受影響。"
+        )
+    return ""
 
 def _today_str() -> str:
     return datetime.now(_TZ_TW).strftime("%Y-%m-%d")
@@ -844,10 +858,11 @@ _MODELS = [
 
 def _call_claude(history: list) -> str:
     """依序嘗試 _MODELS，第一個成功的回傳結果；全部失敗才丟例外。"""
+    status = store_status_text()
     system_blocks = [
         {"type": "text", "text": SYSTEM_TEXT,
          "cache_control": {"type": "ephemeral"}},
-        {"type": "text", "text": current_date_text()},
+        {"type": "text", "text": current_date_text() + (f"\n{status}" if status else "")},
     ]
     last_err = None
     for model in _MODELS:
@@ -981,6 +996,21 @@ def webhook():
                             target=lambda m=msgs, tk=token: reply(tk, f"✅ 已推播圖片給 {broadcast_to_all(m)} 位客戶"),
                             daemon=True,
                         ).start()
+                    continue
+                # 臨時打烊 / 提前售完公告
+                if t.startswith("!closed"):
+                    global _store_closed_msg
+                    reason = t[len("!closed"):].strip() or "門市今日提前打烊，造成不便敬請見諒"
+                    _store_closed_msg = reason
+                    _redis(["SET", "store_closed", reason, "EX", 86400])
+                    reply(token, f"✅ 已設定臨時公告：\n「{reason}」\n\n機器人會主動告知詢問的客人。\n輸入 !open 恢復正常營業。")
+                    continue
+                # 恢復正常營業
+                if t == "!open":
+                    global _store_closed_msg
+                    _store_closed_msg = ""
+                    _redis(["DEL", "store_closed"])
+                    reply(token, "✅ 門市已恢復正常營業狀態。")
                     continue
                 # 開始模擬客人下單測試
                 if t == "!test":
