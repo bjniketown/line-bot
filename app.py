@@ -77,10 +77,16 @@ _WEEKDAYS = ["星期一", "星期二", "星期三", "星期四", "星期五", "�
 
 def current_date_text() -> str:
     now = datetime.now(_TZ_TW)
-    return (
+    base = (
         f"現在台灣時間：{now.strftime('%Y年%m月%d日')} "
         f"{_WEEKDAYS[now.weekday()]} {now.strftime('%H:%M')}"
     )
+    try:
+        is_open, open_msg = _is_open_now()
+        status = "✅ 門市目前營業中" if is_open else f"🚫 門市目前非營業時間（{open_msg}）——請勿引導客人今日前往，應詢問是否預約其他日期"
+        return f"{base}\n{status}"
+    except Exception:
+        return base
 
 def set_store_closed(msg: str):
     global _store_closed_msg
@@ -555,7 +561,7 @@ KEYWORD_RULES = [
      "提供後我們會在 LINE 回覆匯款資訊，出貨前完成匯款即可 😊"),
 
     ("📍 門市地址",
-     ["門市", "地址", "在哪", "實體店"],
+     ["門市在哪", "門市地址", "門市位置", "門市怎麼去", "怎麼去門市", "地址", "在哪", "實體店"],
      "門市資訊：\n"
      "📍 台中市東勢區豐勢路中盛巷24號\n"
      "📞 04-25882881\n\n"
@@ -689,7 +695,9 @@ def quick_rule_reply(text):
             _track_faq(label)
             return reply_text
     # 超短訊息（2字以內且非問句）→ 親切回應
-    if len(t) <= 2 and "?" not in t and "？" not in t:
+    # 排除訂單流程中的有效回答（讓 Claude 依對話脈絡處理）
+    _ORDER_BYPASS = {"門市", "現金", "轉帳", "匯款"}
+    if len(t) <= 2 and "?" not in t and "？" not in t and t not in _ORDER_BYPASS:
         return "您好！請問有什麼可以幫您的嗎？😊"
     return None
 
@@ -980,7 +988,10 @@ def ask_with_cache(uid, msg):
 
     _track_faq(f"🤖 {key[:35]}")       # Claude 新問題統計
     clean, is_order = ask(uid, msg)
-    if use_cache and not is_order:
+    _reply_time_sensitive = any(kw in clean for kw in (
+        "今天", "今日", "明天", "明日", "現在", "目前", "打烊", "公休", "已關",
+    ))
+    if use_cache and not is_order and not _reply_time_sensitive:
         faq_cache[key] = clean
     return clean
 
