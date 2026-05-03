@@ -642,6 +642,34 @@ def _track_faq(label: str):
     _redis(["ZINCRBY", "faq_stats", "1", label])
 
 
+_OPEN_HOURS = {
+    0: [(8,0,13,30),(16,0,18,0)],   # 週一
+    1: [(8,0,13,30),(16,0,18,0)],   # 週二
+    2: [(8,0,13,30),(16,0,18,0)],   # 週三
+    3: None,                         # 週四 公休
+    4: [(8,0,13,30),(16,0,18,0)],   # 週五
+    5: [(8,0,13,30),(16,0,18,0)],   # 週六
+    6: [(8,0,13,30)],               # 週日
+}
+
+def _is_open_now() -> tuple[bool, str]:
+    """回傳 (是否營業中, 說明文字)。"""
+    now = datetime.now(_TZ_TW)
+    wd  = now.weekday()
+    slots = _OPEN_HOURS.get(wd)
+    if slots is None:
+        return False, f"今天是週四，門市固定公休 😊"
+    h, m = now.hour, now.minute
+    for sh, sm, eh, em in slots:
+        if (h, m) >= (sh, sm) and (h, m) < (eh, em):
+            return True, f"目前門市營業中（{sh:02d}:{sm:02d}–{eh:02d}:{em:02d}）😊"
+    # 找下一個時段
+    for sh, sm, eh, em in slots:
+        if (h, m) < (sh, sm):
+            return False, f"目前門市暫時休息，今日下一個時段 {sh:02d}:{sm:02d} 開始 😊"
+    return False, "今日門市已打烊，明日請依正常營業時間前來 😊"
+
+
 def quick_rule_reply(text):
     """打招呼/感謝/關鍵字 → 直接回傳，完全不呼叫 Claude。"""
     t = text.strip()
@@ -649,6 +677,12 @@ def quick_rule_reply(text):
     exact = EXACT_REPLIES.get(t) or EXACT_REPLIES.get(t.lower())
     if exact:
         return exact
+    # 今天/現在 營業時間查詢 → 程式碼直接回答，零 token
+    if any(kw in t for kw in ("今天有開", "現在有開", "今天營業", "現在營業",
+                               "今天開嗎", "現在開嗎", "有在營業", "有開門嗎",
+                               "今日營業", "今天公休", "今天休息")):
+        _, msg = _is_open_now()
+        return msg
     # 關鍵字比對（先做，避免「運費」等2字關鍵字被2字規則誤攔）
     for label, keywords, reply_text in KEYWORD_RULES:
         if any(kw in t for kw in keywords):
@@ -918,10 +952,21 @@ def ask(uid, msg):
     return clean, bool(order_info)
 
 
+_TIME_SENSITIVE = (
+    "今天", "今日", "明天", "明日", "昨天", "現在", "幾點", "幾號", "幾月",
+    "星期", "禮拜", "週幾", "本週", "這週", "今年", "何時", "什麼時候",
+    "有開", "有沒有開", "營業嗎", "開門嗎", "公休", "打烊", "出貨嗎",
+)
+
 def ask_with_cache(uid, msg):
-    """先查快取省 token；未命中才呼叫 Claude。有訂單的回答不快取。"""
+    """先查快取省 token；未命中才呼叫 Claude。有訂單或時間敏感的回答不快取。"""
     context_starts = ("那", "這", "剛", "你說", "您說", "之前", "上面")
-    use_cache = len(msg) >= 6 and not any(msg.startswith(w) for w in context_starts)
+    time_sensitive = any(kw in msg for kw in _TIME_SENSITIVE)
+    use_cache = (
+        len(msg) >= 6
+        and not any(msg.startswith(w) for w in context_starts)
+        and not time_sensitive
+    )
 
     key = cache_key(msg)
     if use_cache and key in faq_cache:
