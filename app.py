@@ -83,15 +83,24 @@ def current_date_text() -> str:
     )
     try:
         is_open, open_msg = _is_open_now()
-        status = "✅ 門市目前營業中" if is_open else f"🚫 門市目前非營業時間（{open_msg}）——請勿引導客人今日前往，應詢問是否預約其他日期"
+        status = "✅ 門市目前營業中" if is_open else (
+            f"🚫 門市目前非營業時間（{open_msg}）——"
+            f"禁止引導客人今日前往門市取貨，應詢問是否改約其他營業時間；"
+            f"宅配訂單不受影響，非營業時間仍可正常收單。"
+        )
         return f"{base}\n{status}"
     except Exception:
         return base
 
+def _seconds_until_midnight() -> int:
+    now = datetime.now(_TZ_TW)
+    midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return max(60, int((midnight - now).total_seconds()))
+
 def set_store_closed(msg: str):
     global _store_closed_msg
     _store_closed_msg = msg
-    _redis(["SET", "store_closed", msg, "EX", 86400])
+    _redis(["SET", "store_closed", msg, "EX", _seconds_until_midnight()])
 
 def clear_store_closed():
     global _store_closed_msg
@@ -453,13 +462,15 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
 3. 能回答的問題請直接回答，不要動不動叫客人打電話，機器人的目的就是減少老闆接電話的次數
 4. 涉及出貨排程、庫存確認等需要人工判斷的問題，回覆：「這部分我幫您留言給客服，會盡快在 LINE 為您確認 😊」—— 不主動提供電話號碼
 5. 問題超出知識範圍時，回覆：「這個問題我幫您轉達給客服，請稍候，客服會在 LINE 回覆您 😊」—— 不主動提供電話號碼
-6. 電話號碼（04-25882881）只在以下情況才提供：客人主動詢問電話、收到商品有緊急損壞問題、系統或物流緊急異常
+6. 【地址與電話不主動提供】客人大多已熟悉店家資訊，回覆中不主動附上門市地址或電話；僅在以下情況才提供：
+   - 門市地址：客人主動詢問「在哪」「地址」「怎麼去」等
+   - 電話號碼（04-25882881）：客人主動詢問電話、收到商品有緊急損壞問題、系統或物流緊急異常
 7. 不確定的事情不要捏造，說明客服會在 LINE 確認，讓客人安心等候
 6. 【購買意願必問】當客人表達購買意願時，第一步務必先詢問：「請問您是要門市自取，還是宅配到府呢？」確認後再收集對應資料，不可混用規則。
    - 門市自取：收集 貴姓+稱謂（小姐/先生）、電話、預計取貨日期/時間（三項，缺一不可）
    - 宅配：收集 全名、電話、收件地址、品項數量（四項缺一不可）；希望出貨日期可順帶詢問，但客服會再次確認，不強制等待
 7. 【宅配時間說明】宅配客人若詢問幾天收到，務必說明：出貨日不等於收件日，正常收件為出貨日 +1 天；繁盛期除外。
-8. 【非營業時間取貨】若客人詢問非營業時間取貨（週四全日、或每日非營業時段），婉轉拒絕並告知營業時間：週一至六 08:00–13:30 / 16:00–18:00，週日 08:00–13:30。
+8. 【非營業時間門市取貨】若客人詢問非營業時間前往門市取貨（週四全日、或每日非營業時段），婉轉拒絕並告知可預約的營業時間：週一至六 08:00–13:30 / 16:00–18:00，週日 08:00–13:30。宅配訂單不受此限制，非營業時間仍可正常收單，出貨日由老闆確認。
 9. 【門市取貨必問】確認門市自取後，主動詢問品項與包裝種類；宅配一律真空包裝，不需詢問。
    - 豆干絲：詢問一般（60元）或真空（70元）；真空包裝建議前一天預訂
    - 昆布／花生：詢問 50 元或 100 元；若需真空包裝須提前預訂
@@ -676,7 +687,7 @@ def _is_open_now() -> tuple[bool, str]:
     return False, "今日門市已打烊，明日請依正常營業時間前來 😊"
 
 
-def quick_rule_reply(text):
+def quick_rule_reply(text, uid=None):
     """打招呼/感謝/關鍵字 → 直接回傳，完全不呼叫 Claude。"""
     t = text.strip()
     # 完全比對（不分大小寫）
@@ -695,9 +706,10 @@ def quick_rule_reply(text):
             _track_faq(label)
             return reply_text
     # 超短訊息（2字以內且非問句）→ 親切回應
-    # 排除訂單流程中的有效回答（讓 Claude 依對話脈絡處理）
-    _ORDER_BYPASS = {"門市", "現金", "轉帳", "匯款"}
-    if len(t) <= 2 and "?" not in t and "？" not in t and t not in _ORDER_BYPASS:
+    # 有對話歷史代表是中途回答（如「一般」「真空」「門市」），讓 Claude 依脈絡處理
+    if len(t) <= 2 and "?" not in t and "？" not in t:
+        if uid and get_history(uid):
+            return None
         return "您好！請問有什麼可以幫您的嗎？😊"
     return None
 
@@ -1124,7 +1136,7 @@ def webhook():
                 reply(token, share_messages())
                 continue
 
-            rule = quick_rule_reply(text)
+            rule = quick_rule_reply(text, effective_uid)
             if rule:
                 reply(token, rule)
                 continue
