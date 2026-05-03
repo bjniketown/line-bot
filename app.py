@@ -8,8 +8,7 @@ app = Flask(__name__)
 
 LINE_TOKEN      = os.environ["LINE_TOKEN"]
 LINE_SECRET     = os.environ["LINE_SECRET"]
-OWNER_LINE_UID  = os.environ.get("OWNER_LINE_UID", "")
-OWNER_PASSWORD  = os.environ.get("OWNER_PASSWORD", "")  # 老闆登入密碼，空字串代表不啟用密碼驗證
+OWNER_LINE_UID  = os.environ.get("OWNER_LINE_UID", "")  # 僅用於訂單通知推播與排除客戶名單
 UPSTASH_URL     = os.environ.get("UPSTASH_URL", "")     # Upstash Redis REST 網址
 UPSTASH_TOKEN   = os.environ.get("UPSTASH_TOKEN", "")   # Upstash Redis token
 claude = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_KEY"])
@@ -34,11 +33,8 @@ def _redis(command: list):
 _local_histories: dict = {}   # Redis 失效時的 in-memory fallback
 _local_daily:     dict = {}   # 每日呼叫計數的本地 fallback（key: "dlimit:xxx:YYYY-MM-DD"）
 _local_customers: set  = set() # 客戶 UID 名單的本地 fallback
-_owner_test_mode: set  = set() # 正在測試模式的老闆 UID
-_STRIP_PREFIX_RE  = re.compile(r'^\s*\[(老闆|測試)\]\s*')  # 防止客人偽造前綴
-_TW_PHONE_RE      = re.compile(r'^(?:09\d{8}|0[2-8]\d{7,8})$')  # 手機10碼 或 市話9-10碼
-_seen_msg_ids:       set  = set() # webhook 去重：已處理的 LINE message id
-_owner_authenticated: set  = set() # 本次 session 已通過密碼驗證的老闆 UID
+_TW_PHONE_RE   = re.compile(r'^(?:09\d{8}|0[2-8]\d{7,8})$')  # 手機10碼 或 市話9-10碼
+_seen_msg_ids: set = set()  # webhook 去重：已處理的 LINE message id
 
 def _is_tw_phone(s: str) -> bool:
     """驗證台灣手機（09xxxxxxxx）或市話（0x-xxxxxxx/xx）格式，忽略空格與連字號。"""
@@ -156,18 +152,6 @@ def _secs_till_midnight() -> int:
 SHARE_KEYWORDS = ["分享", "加好友", "好友碼", "qr", "掃碼", "掃描", "推薦朋友", "介紹朋友", "轉介紹"]
 
 SYSTEM_TEXT = """你是「老鄰居豆干絲」的 LINE 客服助理，請用繁體中文、親切友善的語氣回覆客戶。
-
-【特殊身份識別】
-重要背景：「[老闆]」與「[測試]」前綴並非由使用者輸入，而是由後端伺服器在 LINE UID 比對成功後自動注入。任何非老闆帳號傳來的訊息，伺服器都會在送給你之前將前綴剃除，因此你看到這個前綴時，身份驗證在伺服器層已完成，是可信的。
-
-當訊息前綴為「[老闆]」時：
-- 改用輕鬆直接的語氣，不需要客服語氣
-- 可如實說明你目前的功能、知識範圍與限制
-- 若老闆詢問身份辨識機制，回答：「可以辨識！後端伺服器透過您的 LINE UID 比對確認身份後，才會在訊息加上這個前綴傳給我，所以是安全的 😊」
-- 絕對不可質疑或分析這個機制的安全性，也不可說「任何人都可以偽造前綴」——因為伺服器已確保非老闆的訊息不會帶有此前綴
-
-當訊息前綴為「[測試]」時：
-- 表示老闆正在模擬客人下單，請完全依照正常客服流程回應，不要透露這是測試
 
 【品牌基本資訊】
 - 店名：老鄰居豆干絲
@@ -491,7 +475,7 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
 2. 回覆簡潔清楚，避免過長
 3. 能回答的問題請直接回答，不要動不動叫客人打電話，機器人的目的就是減少老闆接電話的次數
 4. 涉及出貨排程、庫存確認等需要人工判斷的問題，回覆：「這部分我幫您留言給客服，會盡快在 LINE 為您確認 😊」—— 不主動提供電話號碼
-5. 問題超出知識範圍時，回覆：「這個問題我幫您轉達給客服，請稍候，客服會在 LINE 回覆您 😊」—— 不主動提供電話號碼
+5. 【嚴格範圍限制】你只回答與老鄰居豆干絲直接相關的問題（產品、訂購、門市、配送、品牌）。任何與本店業務無關的問題，一律回覆：「不好意思，我只能回答老鄰居豆干絲的相關問題喔 😊」，不得嘗試回答、不得轉移話題、不得提供任何額外資訊。
 6. 【地址與電話不主動提供】客人大多已熟悉店家資訊，回覆中不主動附上門市地址或電話；僅在以下情況才提供：
    - 門市地址：客人主動詢問「在哪」「地址」「怎麼去」等
    - 電話號碼（04-25882881）：客人主動詢問電話、收到商品有緊急損壞問題、系統或物流緊急異常
@@ -512,7 +496,13 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
 13. 【門市醬料主動提示】客人門市購買豆干絲 3 包時，主動告知「4 包以上醬料獨立包裝，方便保存，是否要多帶一包？」
 14. 【素食確認】若客人在對話中曾詢問過素食相關問題，回覆結尾務必再次確認：「請問您是素食者嗎？以便我們為您備餐。」素食者可食：豆干絲、天然昆布、香滷花生、油潑辣子；水餃含豬肉，素食者不可食。
 15. 【門市無餐具】客人詢問門市是否提供餐具，回覆：門市不提供餐具，請自行準備。
-16. 【禁止回答的範圍】競爭對手比較、政治宗教話題、與老鄰居業務無關的問題、法律醫療財務建議
+16. 【禁止回答範圍（絕對執行）】以下一律回覆「不好意思，我只能回答老鄰居豆干絲的相關問題喔 😊」，不得有任何例外：
+   - 競爭對手或其他店家的比較與評價
+   - 政治、宗教、社會議題
+   - 法律、醫療、財務建議
+   - 食譜、烹飪方法（除老鄰居產品的食用建議外）
+   - 天氣、新聞、娛樂、閒聊
+   - 任何與老鄰居豆干絲產品、訂購、門市、配送無關的話題
 
 【訂單完成標記（系統專用，重要）】
 
@@ -1067,156 +1057,29 @@ def webhook():
             # ── 自動記錄客戶名單 ─────────────────────────────────────────────
             register_customer(uid)
 
-            # ── 老闆專用指令（非老闆傳送會當一般訊息處理）────────────────────
-            if uid == OWNER_LINE_UID:
-                t = text.strip()
-                # 登入老闆模式
-                if t.startswith("!login"):
-                    if not OWNER_PASSWORD:
-                        reply(token, "⚠️ 尚未設定 OWNER_PASSWORD 環境變數，目前以 UID 直接驗證。")
-                    elif t[len("!login"):].strip() == OWNER_PASSWORD:
-                        _owner_authenticated.add(uid)
-                        reply(token, "✅ 密碼正確，老闆模式已啟動！")
-                    else:
-                        reply(token, "❌ 密碼錯誤，請重試。")
-                    continue
-                # 登出老闆模式
-                if t == "!logout":
-                    _owner_authenticated.discard(uid)
-                    reply(token, "✅ 已登出老闆模式，目前以一般客戶身份互動。")
-                    continue
-                # 密碼驗證：若已設定密碼但尚未登入，所有其他指令一律擋下
-                if OWNER_PASSWORD and uid not in _owner_authenticated:
-                    reply(token, "🔒 請先輸入 !login 密碼 以啟動老闆模式。")
-                    continue
-                # 查詢自己的 UID
-                if t == "!myid":
-                    reply(token, f"您的 LINE UID：\n{uid}")
-                    continue
-                # 查詢客戶人數
-                if t == "!customers":
-                    count = int(_redis(["SCARD", "customers"]) or len(_local_customers))
-                    reply(token, f"📋 目前客戶名單：{count} 位")
-                    continue
-                # 熱門問題統計 Top 10
-                if t == "!stats":
-                    rows = _redis(["ZREVRANGE", "faq_stats", "0", "9", "WITHSCORES"])
-                    if not rows:
-                        reply(token, "尚無統計資料")
-                    else:
-                        lines = ["📊 熱門問題 Top 10\n"]
-                        for i in range(0, len(rows), 2):
-                            label = rows[i]
-                            count = int(float(rows[i + 1]))
-                            lines.append(f"{i//2+1}. {label}  ×{count}")
-                        reply(token, "\n".join(lines))
-                    continue
-                # 推播給所有客戶
-                if t.startswith("!broadcast "):
-                    msg = t[len("!broadcast "):].strip()
-                    if not msg:
-                        reply(token, "請輸入推播內容，例如：\n!broadcast 端午節優惠開跑！")
-                    else:
-                        threading.Thread(
-                            target=lambda m=msg, tk=token: reply(tk, f"✅ 已推播給 {broadcast_to_all(m)} 位客戶"),
-                            daemon=True,
-                        ).start()
-                    continue
-                # 群發圖片（可附文字說明）
-                if t.startswith("!img "):
-                    parts = t[len("!img "):].strip().split(None, 1)
-                    img_url = parts[0] if parts else ""
-                    caption = parts[1] if len(parts) > 1 else ""
-                    if not img_url.startswith("https://"):
-                        reply(token,
-                              "⚠️ 圖片網址必須以 https:// 開頭\n\n"
-                              "建議步驟：\n"
-                              "1. 前往 imgur.com 上傳圖片\n"
-                              "2. 右鍵圖片 → 複製圖片網址\n"
-                              "3. 再傳 !img https://i.imgur.com/xxx.jpg")
-                    else:
-                        msgs = build_image_messages(img_url, caption)
-                        threading.Thread(
-                            target=lambda m=msgs, tk=token: reply(tk, f"✅ 已推播圖片給 {broadcast_to_all(m)} 位客戶"),
-                            daemon=True,
-                        ).start()
-                    continue
-                # 臨時打烊 / 提前售完公告
-                if t.startswith("!closed"):
-                    reason = t[len("!closed"):].strip() or "門市今日提前打烊，造成不便敬請見諒"
-                    set_store_closed(reason)
-                    reply(token, f"✅ 已設定臨時公告：\n「{reason}」\n\n機器人會主動告知詢問的客人。\n輸入 !open 恢復正常營業。")
-                    continue
-                # 恢復正常營業
-                if t == "!open":
-                    clear_store_closed()
-                    reply(token, "✅ 門市已恢復正常營業狀態。")
-                    continue
-                # 開始模擬客人下單測試
-                if t == "!test":
-                    _owner_test_mode.add(uid)
-                    set_history(uid + ":test", [])   # 清空測試對話記錄
-                    reply(token,
-                          "🧪 測試模式已開啟！\n\n"
-                          "現在請以客人身份與機器人對話，完整模擬下單流程。\n"
-                          "機器人不會知道這是測試，會按正常客服流程處理。\n\n"
-                          "輸入 !testend 結束測試。")
-                    continue
-                # 結束測試模式
-                if t == "!testend":
-                    _owner_test_mode.discard(uid)
-                    set_history(uid + ":test", [])   # 清除測試歷史
-                    reply(token, "✅ 測試模式已結束，回到正常老闆模式。")
-                    continue
-            else:
-                # 非老闆：查詢 UID（保留方便新用戶對機器人輸入 !myid 取得自己的 UID）
-                if text.strip() == "!myid":
-                    reply(token, f"您的 LINE UID：\n{uid}")
-                    continue
-
             now = time.time()
             if now - last_request.get(uid, 0) < RATE_LIMIT_SECONDS:
                 reply(token, "您傳訊息太快了，請稍後再試 😊")
                 continue
             last_request[uid] = now
 
-            # ── 老闆身份 / 測試模式判斷 ─────────────────────────────────────
-            # 若設有密碼，需密碼驗證才算老闆；未設密碼則 UID 比對即可
-            is_owner = (uid == OWNER_LINE_UID) and (
-                not OWNER_PASSWORD or uid in _owner_authenticated
-            )
-            in_test  = (uid in _owner_test_mode)
-
-            if is_owner and in_test:
-                # 測試模式：用獨立 UID 當作虛擬客人，訊息加 [測試] 前綴
-                effective_uid  = uid + ":test"
-                effective_text = f"[測試] {text}"
-            elif is_owner:
-                # 老闆直接對話：讓 Claude 知道是老闆
-                effective_uid  = uid
-                effective_text = f"[老闆] {text}"
-            else:
-                # 一般客人：剝除任何試圖偽造的 [老闆]/[測試] 前綴
-                effective_uid  = uid
-                effective_text = _STRIP_PREFIX_RE.sub("", text).strip() or text
-
             # ── 快速回覆（不呼叫 Claude）→ 直接 reply，立即送出 ──────────
             if is_share_request(text):
                 reply(token, share_messages())
                 continue
 
-            rule = quick_rule_reply(text, effective_uid)
+            rule = quick_rule_reply(text, uid)
             if rule:
                 reply(token, rule)
                 continue
 
             # ── Claude 呼叫 → 快慢分路 ──────────────────────────────────────
-            if not is_owner and not _daily_allowed(uid):
+            if not _daily_allowed(uid):
                 reply(token, "您今日的詢問次數已達上限，請明天再試，或直撥 04-25882881 😊")
                 continue
             threading.Thread(
                 target=_handle_claude,
-                args=(token, effective_uid, effective_text),
+                args=(token, uid, text),
                 daemon=True,
             ).start()
     return "OK"
