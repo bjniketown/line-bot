@@ -1015,6 +1015,11 @@ def is_share_request(text):
     t = text.lower()
     return any(kw in t for kw in SHARE_KEYWORDS)
 
+_RESET_KEYWORDS = ["清除記憶"]
+
+def is_reset_request(text):
+    return any(kw in text for kw in _RESET_KEYWORDS)
+
 
 def share_messages():
     """回傳分享好友用的訊息組合（文字 + QR code 圖片）"""
@@ -1153,6 +1158,11 @@ def webhook():
             last_request[uid] = now
 
             # ── 快速回覆（不呼叫 Claude）→ 直接 reply，立即送出 ──────────
+            if is_reset_request(text):
+                set_history(uid, [])
+                reply(token, "好的！對話記憶已清除，我們重新開始 😊 請問有什麼可以幫您的嗎？")
+                continue
+
             if is_share_request(text):
                 reply(token, share_messages())
                 continue
