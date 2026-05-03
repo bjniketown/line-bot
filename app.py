@@ -11,6 +11,7 @@ LINE_SECRET     = os.environ["LINE_SECRET"]
 OWNER_LINE_UID  = os.environ.get("OWNER_LINE_UID", "")  # 僅用於訂單通知推播與排除客戶名單
 UPSTASH_URL     = os.environ.get("UPSTASH_URL", "")     # Upstash Redis REST 網址
 UPSTASH_TOKEN   = os.environ.get("UPSTASH_TOKEN", "")   # Upstash Redis token
+ADMIN_TOKEN     = os.environ.get("ADMIN_TOKEN", "")      # 門市管理端點驗證 token
 claude = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_KEY"])
 
 
@@ -739,6 +740,9 @@ def _is_open_now() -> tuple[bool, str]:
 def quick_rule_reply(text, uid=None):
     """打招呼/感謝/關鍵字 → 直接回傳，完全不呼叫 Claude。"""
     t = text.strip()
+    # 門市停單：攔截取貨相關關鍵字，避免繞過 Claude 直接回傳錯誤訊息
+    if store_status_text() and any(kw in t for kw in ("自取", "店取", "門市取", "取貨", "來店")):
+        return "非常抱歉，今日門市暫停接單 🙏\n宅配照常服務，如需宅配請告知，我為您安排 😊"
     # 完全比對（不分大小寫）
     exact = EXACT_REPLIES.get(t) or EXACT_REPLIES.get(t.lower())
     if exact:
@@ -1109,6 +1113,47 @@ def webhook():
 @app.route("/ping")
 def ping():
     return "pong"
+
+
+@app.route("/store")
+def store_admin():
+    """門市停單管理端點。書籤存到手機，點一下即可切換狀態。不經過 LINE。"""
+    token  = request.args.get("token", "")
+    action = request.args.get("action", "")
+    reason = request.args.get("reason", "今日提前售完")
+
+    if not ADMIN_TOKEN or token != ADMIN_TOKEN:
+        abort(403)
+
+    if action == "close":
+        set_store_closed(reason)
+        return (
+            f"<h2>✅ 門市停單已啟動</h2>"
+            f"<p>原因：{reason}</p>"
+            f"<p>宅配不受影響，照常接單。</p>"
+            f"<p>午夜 00:00 自動恢復。</p>"
+            f"<p><a href='/store?token={token}'>← 返回管理頁</a></p>"
+        )
+    elif action == "open":
+        clear_store_closed()
+        return (
+            "<h2>✅ 門市恢復接單</h2>"
+            "<p>門市取貨訂單已恢復正常。</p>"
+            f"<p><a href='/store?token={token}'>← 返回管理頁</a></p>"
+        )
+    else:
+        current = store_status_text()
+        if current:
+            status_html = "<p style='color:red;font-weight:bold'>🔴 目前門市停單中，宅配照常</p>"
+        else:
+            status_html = "<p style='color:green;font-weight:bold'>🟢 目前正常接單</p>"
+        return (
+            "<h2>老鄰居門市管理</h2>"
+            f"{status_html}"
+            f"<p><a href='/store?action=close&token={token}&reason=今日提前售完'>🔴 關閉門市接單（今日售完）</a></p>"
+            f"<p><a href='/store?action=close&token={token}&reason=今日臨時公休'>🔴 關閉門市接單（臨時公休）</a></p>"
+            f"<p><a href='/store?action=open&token={token}'>🟢 恢復門市接單</a></p>"
+        )
 
 
 if __name__ == "__main__":
