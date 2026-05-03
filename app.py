@@ -82,6 +82,16 @@ def current_date_text() -> str:
         f"{_WEEKDAYS[now.weekday()]} {now.strftime('%H:%M')}"
     )
 
+def set_store_closed(msg: str):
+    global _store_closed_msg
+    _store_closed_msg = msg
+    _redis(["SET", "store_closed", msg, "EX", 86400])
+
+def clear_store_closed():
+    global _store_closed_msg
+    _store_closed_msg = ""
+    _redis(["DEL", "store_closed"])
+
 def store_status_text() -> str:
     """回傳目前門市狀態，供每次呼叫 Claude 時動態注入。"""
     msg = _store_closed_msg or (_redis(["GET", "store_closed"]) or "")
@@ -999,17 +1009,13 @@ def webhook():
                     continue
                 # 臨時打烊 / 提前售完公告
                 if t.startswith("!closed"):
-                    global _store_closed_msg
                     reason = t[len("!closed"):].strip() or "門市今日提前打烊，造成不便敬請見諒"
-                    _store_closed_msg = reason
-                    _redis(["SET", "store_closed", reason, "EX", 86400])
+                    set_store_closed(reason)
                     reply(token, f"✅ 已設定臨時公告：\n「{reason}」\n\n機器人會主動告知詢問的客人。\n輸入 !open 恢復正常營業。")
                     continue
                 # 恢復正常營業
                 if t == "!open":
-                    global _store_closed_msg
-                    _store_closed_msg = ""
-                    _redis(["DEL", "store_closed"])
+                    clear_store_closed()
                     reply(token, "✅ 門市已恢復正常營業狀態。")
                     continue
                 # 開始模擬客人下單測試
