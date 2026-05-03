@@ -35,6 +35,29 @@ _local_daily:     dict = {}   # 每日呼叫計數的本地 fallback（key: "dli
 _local_customers: set  = set() # 客戶 UID 名單的本地 fallback
 _owner_test_mode: set  = set() # 正在測試模式的老闆 UID
 _STRIP_PREFIX_RE  = re.compile(r'^\s*\[(老闆|測試)\]\s*')  # 防止客人偽造前綴
+_TW_PHONE_RE      = re.compile(r'^(?:09\d{8}|0[2-8]\d{7,8})$')  # 手機10碼 或 市話9-10碼
+_seen_msg_ids:    set  = set() # webhook 去重：已處理的 LINE message id
+
+def _is_tw_phone(s: str) -> bool:
+    """驗證台灣手機（09xxxxxxxx）或市話（0x-xxxxxxx/xx）格式，忽略空格與連字號。"""
+    return bool(_TW_PHONE_RE.match(re.sub(r'[\s\-]', '', s)))
+
+def _is_duplicate_event(mid: str) -> bool:
+    """LINE webhook 重送去重。同一 message id 只處理一次（5 分鐘視窗）。"""
+    global _seen_msg_ids
+    if mid in _seen_msg_ids:
+        return True
+    _seen_msg_ids.add(mid)
+    if len(_seen_msg_ids) > 500:   # 防止無限成長
+        _seen_msg_ids.clear()
+    if UPSTASH_URL:
+        res = _redis(["SET", f"mid:{mid}", "1", "NX", "EX", 300])
+        if res is None:
+            # None 可能是「key 已存在」或「Redis 無回應」，用 EXISTS 確認
+            if _redis(["EXISTS", f"mid:{mid}"]) == 1:
+                return True   # 確認是重複，非 Redis 故障
+    return False
+
 _store_closed_msg: str = ""   # 臨時打烊訊息，空字串代表正常營業
 
 def get_history(uid: str) -> list:
@@ -466,19 +489,23 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
    - 門市地址：客人主動詢問「在哪」「地址」「怎麼去」等
    - 電話號碼（04-25882881）：客人主動詢問電話、收到商品有緊急損壞問題、系統或物流緊急異常
 7. 不確定的事情不要捏造，說明客服會在 LINE 確認，讓客人安心等候
-6. 【購買意願必問】當客人表達購買意願時，第一步務必先詢問：「請問您是要門市自取，還是宅配到府呢？」確認後再收集對應資料，不可混用規則。
+8. 【購買意願必問】當客人表達購買意願時，第一步務必先詢問：「請問您是要門市自取，還是宅配到府呢？」確認後再收集對應資料，不可混用規則。
    - 門市自取：收集 貴姓+稱謂（小姐/先生）、電話、預計取貨日期/時間（三項，缺一不可）
    - 宅配：收集 全名、電話、收件地址、品項數量（四項缺一不可）；希望出貨日期可順帶詢問，但客服會再次確認，不強制等待
-7. 【宅配時間說明】宅配客人若詢問幾天收到，務必說明：出貨日不等於收件日，正常收件為出貨日 +1 天；繁盛期除外。
-8. 【非營業時間門市取貨】若客人詢問非營業時間前往門市取貨（週四全日、或每日非營業時段），婉轉拒絕並告知可預約的營業時間：週一至六 08:00–13:30 / 16:00–18:00，週日 08:00–13:30。宅配訂單不受此限制，非營業時間仍可正常收單，出貨日由老闆確認。
-9. 【門市取貨必問】確認門市自取後，主動詢問品項與包裝種類；宅配一律真空包裝，不需詢問。
+9. 【電話格式驗證】收集客人電話時，確認格式是否符合台灣規格：
+   - 手機：09 開頭，共 10 碼（例：0912-345-678）
+   - 市話：區碼 02–08 開頭，共 9–10 碼（例：04-2588-2881）
+   若位數不對、或開頭不符，請親切告知：「請問您的電話是否正確？台灣手機為 09 開頭共 10 碼，市話請含區碼 😊」，等客人重新提供後再繼續。
+10. 【宅配時間說明】宅配客人若詢問幾天收到，務必說明：出貨日不等於收件日，正常收件為出貨日 +1 天；繁盛期除外。
+11. 【非營業時間門市取貨】若客人詢問非營業時間前往門市取貨（週四全日、或每日非營業時段），婉轉拒絕並告知可預約的營業時間：週一至六 08:00–13:30 / 16:00–18:00，週日 08:00–13:30。宅配訂單不受此限制，非營業時間仍可正常收單，出貨日由老闆確認。
+12. 【門市取貨必問】確認門市自取後，主動詢問品項與包裝種類；宅配一律真空包裝，不需詢問。
    - 豆干絲：詢問一般（60元）或真空（70元）；真空包裝建議前一天預訂
    - 昆布／花生：詢問 50 元或 100 元；若需真空包裝須提前預訂
    - 油潑辣子：120 元/罐，若需 10 罐以上請先詢問老闆庫存
-10. 【門市醬料主動提示】客人門市購買豆干絲 3 包時，主動告知「4 包以上醬料獨立包裝，方便保存，是否要多帶一包？」
-11. 【素食確認】若客人在對話中曾詢問過素食相關問題，回覆結尾務必再次確認：「請問您是素食者嗎？以便我們為您備餐。」素食者可食：豆干絲、天然昆布、香滷花生、油潑辣子；水餃含豬肉，素食者不可食。
-12. 【門市無餐具】客人詢問門市是否提供餐具，回覆：門市不提供餐具，請自行準備。
-13. 【禁止回答的範圍】競爭對手比較、政治宗教話題、與老鄰居業務無關的問題、法律醫療財務建議
+13. 【門市醬料主動提示】客人門市購買豆干絲 3 包時，主動告知「4 包以上醬料獨立包裝，方便保存，是否要多帶一包？」
+14. 【素食確認】若客人在對話中曾詢問過素食相關問題，回覆結尾務必再次確認：「請問您是素食者嗎？以便我們為您備餐。」素食者可食：豆干絲、天然昆布、香滷花生、油潑辣子；水餃含豬肉，素食者不可食。
+15. 【門市無餐具】客人詢問門市是否提供餐具，回覆：門市不提供餐具，請自行準備。
+16. 【禁止回答的範圍】競爭對手比較、政治宗教話題、與老鄰居業務無關的問題、法律醫療財務建議
 
 【訂單完成標記（系統專用，重要）】
 
@@ -644,14 +671,18 @@ def notify_owner(customer_uid, order_type, order_summary):
         f"{footer}"
     )
     try:
-        requests.post(
+        r = requests.post(
             "https://api.line.me/v2/bot/message/push",
             headers={"Authorization": f"Bearer {LINE_TOKEN}"},
             json={"to": OWNER_LINE_UID, "messages": [{"type": "text", "text": msg}]},
             timeout=10,
         )
-    except Exception:
-        pass
+        if not r.ok:
+            print(f"[ERROR] notify_owner failed {r.status_code}: {r.text[:200]}")
+            print(f"[ERROR] 未送達訂單內容：{msg}")
+    except Exception as e:
+        print(f"[ERROR] notify_owner exception: {e}")
+        print(f"[ERROR] 未送達訂單內容：{msg}")
 
 
 def _track_faq(label: str):
@@ -751,14 +782,16 @@ def reply(token, messages):
     if isinstance(messages, str):
         messages = [{"type": "text", "text": messages}]
     try:
-        requests.post(
+        r = requests.post(
             "https://api.line.me/v2/bot/message/reply",
             headers={"Authorization": f"Bearer {LINE_TOKEN}"},
             json={"replyToken": token, "messages": messages},
             timeout=10,
         )
-    except Exception:
-        pass
+        if not r.ok:
+            print(f"[WARN] reply failed {r.status_code}: {r.text[:200]}")
+    except Exception as e:
+        print(f"[WARN] reply exception: {e}")
 
 
 def push_message(uid, messages):
@@ -766,14 +799,16 @@ def push_message(uid, messages):
     if isinstance(messages, str):
         messages = [{"type": "text", "text": messages}]
     try:
-        requests.post(
+        r = requests.post(
             "https://api.line.me/v2/bot/message/push",
             headers={"Authorization": f"Bearer {LINE_TOKEN}"},
             json={"to": uid, "messages": messages},
             timeout=15,
         )
-    except Exception:
-        pass
+        if not r.ok:
+            print(f"[WARN] push_message failed {r.status_code}: {r.text[:200]}")
+    except Exception as e:
+        print(f"[WARN] push_message exception: {e}")
 
 
 _FAST_TIMEOUT = 20  # 秒：reply token 有效期 30 秒，等 Claude 最長 20 秒用免費 reply；超時才用 push
@@ -855,14 +890,16 @@ def multicast(uids: list, messages):
     for i in range(0, len(uids), 500):
         batch = uids[i:i + 500]
         try:
-            requests.post(
+            r = requests.post(
                 "https://api.line.me/v2/bot/message/multicast",
                 headers={"Authorization": f"Bearer {LINE_TOKEN}"},
                 json={"to": batch, "messages": messages},
                 timeout=30,
             )
-        except Exception:
-            pass
+            if not r.ok:
+                print(f"[WARN] multicast failed {r.status_code}: {r.text[:200]}")
+        except Exception as e:
+            print(f"[WARN] multicast exception: {e}")
 
 
 def build_image_messages(url: str, caption: str = "") -> list:
@@ -1014,6 +1051,9 @@ def webhook():
         abort(400)
     for e in request.json.get("events", []):
         if e["type"] == "message" and e["message"]["type"] == "text":
+            mid   = e["message"]["id"]
+            if _is_duplicate_event(mid):
+                continue
             text  = e["message"]["text"]
             token = e["replyToken"]
             uid   = e["source"]["userId"]
