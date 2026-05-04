@@ -8,7 +8,7 @@ app = Flask(__name__)
 
 LINE_TOKEN      = os.environ["LINE_TOKEN"]
 LINE_SECRET     = os.environ["LINE_SECRET"]
-OWNER_LINE_UID  = os.environ.get("OWNER_LINE_UID", "")  # 僅用於訂單通知推播與排除客戶名單
+OWNER_LINE_UID  = os.environ.get("OWNER_LINE_UID", "")  # 僅用於豁免每日呼叫上限
 UPSTASH_URL     = os.environ.get("UPSTASH_URL", "")     # Upstash Redis REST 網址
 UPSTASH_TOKEN   = os.environ.get("UPSTASH_TOKEN", "")   # Upstash Redis token
 ADMIN_TOKEN     = os.environ.get("ADMIN_TOKEN", "")      # 門市管理端點驗證 token
@@ -60,6 +60,7 @@ def _is_duplicate_event(mid: str) -> bool:
 _store_closed_msg:  str  = ""  # 臨時打烊訊息，空字串代表正常營業
 _store_closed_days: int  = 1   # 停單天數：1=當日，>1=連假（宅配也停）
 _dumpling_soldout:  bool = False  # 水餃售完旗標
+_chili_soldout:     bool = False  # 辣油售完旗標
 
 def get_history(uid: str) -> list:
     raw = _redis(["GET", f"hist:{uid}"])
@@ -203,6 +204,27 @@ def dumpling_soldout_text() -> str:
         )
     return ""
 
+def set_chili_soldout():
+    global _chili_soldout
+    _chili_soldout = True
+    _redis(["SET", "chili_soldout", "1"])
+
+def clear_chili_soldout():
+    global _chili_soldout
+    _chili_soldout = False
+    _redis(["DEL", "chili_soldout"])
+
+def chili_soldout_text() -> str:
+    """回傳辣油售完狀態，供每次呼叫 Claude 時動態注入。"""
+    sold = _chili_soldout or bool(_redis(["GET", "chili_soldout"]))
+    if sold:
+        return (
+            "【油潑辣子售完】目前油潑辣子已售完。"
+            "客人詢問或訂購辣油時，告知目前售完，其他品項完全不受影響，"
+            "需手動恢復後才可再訂購。"
+        )
+    return ""
+
 def set_has_order(uid: str):
     """標記此客戶已有成立訂單，24 小時內跳過關鍵字攔截。"""
     _redis(["SET", f"has_order:{uid}", "1", "EX", 86400])
@@ -280,7 +302,7 @@ SYSTEM_TEXT = """你是「老鄰居豆干絲」的 LINE 客服助理，請用繁
 
 計算步驟：總包數 ÷ 50，商數為整箱數（免運），餘數套用上方規則。
 
-實際範例：
+實際範例（以豆干絲 70 元/包為例；其他品項請按各自定價計算，勿套用 70 元）：
 - 38 包 → 餘數 38 → 運費 225 元，總計 38×70+225 = 2,885 元
 - 39 包 → 餘數 39 → 運費 290 元，總計 39×70+290 = 3,020 元
 - 49 包 → 餘數 49 → 運費 290 元，總計 49×70+290 = 3,720 元
@@ -293,8 +315,8 @@ SYSTEM_TEXT = """你是「老鄰居豆干絲」的 LINE 客服助理，請用繁
 - 110 包 → 2 整箱 + 餘數 10 → 運費 225 元，總計 110×70+225 = 7,925 元
 
 划算提醒（必須執行，不可省略）：
-- 訂 39–49 單位時，建議湊滿 50 單位，省運費且均價更低
-- 訂 89–99 單位時，建議湊滿 100 單位，同樣更划算
+- 總單位數除以 50 的餘數為 39–49 時，建議湊滿下一個整箱，格式：「💡 小提醒：再加 N 單位湊滿 M 單位（整箱），可省運費 Y 元，請問是否調整呢？」
+  範例：39–49 單位 → 湊滿 50；89–99 單位 → 湊滿 100；139–149 單位 → 湊滿 150；189–199 單位 → 湊滿 200（以此類推）
 - 【減量提醒，強制執行】只要在回覆中顯示運費金額，且餘數為 1–9，無論訂單是否完整（含正在詢問出貨日期、等待確認等中間步驟），都必須在同一則回覆中加上提醒，不可省略、不可延後：
   「💡 小提醒：若將【品項】減少 N 單位調整為 M 單位（整箱），可省運費 Y 元，總計 Z 元，請問是否調整訂單呢？」
   - 單一品項：直接建議減少該品項 N 單位
@@ -417,7 +439,7 @@ Q: 週末可以出貨嗎？
 A: 週日與週四固定公休，不出貨。週六視排程而定，請告知您的需求，客服會在 LINE 確認是否可行 😊
 
 Q: 連假或年節期間還有出貨嗎？
-A: 年節期間暫停出貨，年前最後出貨日約農曆年前 2 月 11 日前後，年後恢復日期會提前公告。
+A: 年節期間暫停出貨，年前最後出貨日與年後恢復日期會提前在 LINE 公告，請留意通知 😊
 
 Q: 可以事先預訂、之後再出貨嗎？
 A: 可以！請確認好數量與希望出貨日期，付款後會幫您排入出貨排程。
@@ -429,7 +451,7 @@ Q: 豆干絲出貨是冷凍還是冷藏？
 A: 使用黑貓冷凍宅配（-18 度），全程冷凍出貨。收到時若稍微退冰屬正常現象，請立即放入冷凍保存。
 
 Q: 保存期限多久？
-A: 豆干絲冷凍保存，賞味期限出貨日起 10 天（包裝標示為出貨日 +11 天）。油潑辣子冷藏約 1 年。
+A: 豆干絲、香滷花生、天然昆布：冷凍保存，賞味期限出貨日起 10 天（包裝標示為出貨日 +11 天），建議盡快食用以確保最佳風味。油潑辣子：冷藏保存約 1 年。
 
 Q: 要加熱嗎？怎麼吃最好？
 A: 不需要加熱！退冰後直接食用最美味，再加熱反而影響口感。
@@ -558,7 +580,7 @@ Q: 可以送到偏遠地區或離島嗎？
 A: 大部分地區都可以送達！偏遠或離島地區可能有額外運費，請提供收件地址，我幫您確認運費是否有異動 😊
 
 Q: 豆干絲有沒有添加防腐劑？
-A: 油潑辣子全手工製作無任何添加劑。豆干絲以傳統工法製作，詳細成分請參考包裝標示。
+A: 老鄰居所有產品均無人工添加劑，請安心食用 😊 正因為不添加防腐劑，保存期限相對較短，建議收到後盡快食用完畢，以確保最佳風味。
 
 Q: 適合送禮嗎？有禮盒嗎？
 A: 真空包裝既適合自用也適合送禮，包裝乾淨清爽。目前沒有獨立禮盒，但多款搭配裝箱也很有誠意！
@@ -571,7 +593,7 @@ Q: 水餃可以宅配嗎？
 A: 很抱歉，水餃目前不提供宅配服務。低溫宅配有失溫風險，退冰後水餃容易黏在一起影響品質，因此只開放門市自取，歡迎親自來選購 😊
 
 Q: 水餃需要預訂嗎？
-A: 一般數量直接來門市購買即可！若您單次需要較多包數，建議提前告知，我幫您向客服確認是否足夠 😊
+A: 5 包以內直接來門市購買即可！若單次需要超過 5 包，請提前告知，我幫您向客服確認庫存是否足夠 😊
 
 Q: 水餃是素食嗎？
 A: 水餃內餡含豬肉，非素食。若您是素食者，我們的豆干絲、天然昆布、香滷花生、油潑辣子都是純素食可食用的品項 😊
@@ -594,7 +616,10 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
 2. 回覆簡潔清楚，避免過長
 3. 能回答的問題請直接回答，不要動不動叫客人打電話，機器人的目的就是減少老闆接電話的次數
 4. 【庫存回覆原則】客人詢問商品是否有貨、還有沒有、能不能買時：
-   - 若目前無任何臨時公告：直接回覆「目前有貨，歡迎訂購 😊」；若同時有【今日水餃售完】公告，須額外提醒「水餃今日已售完，其他品項皆有供應」
+   - 若目前無任何臨時公告：直接回覆「目前有貨，歡迎訂購 😊」
+   - 若有【今日水餃售完】公告：額外提醒「水餃今日已售完，其他品項皆有供應」
+   - 若有【油潑辣子售完】公告：告知辣油目前售完，其他品項皆有供應
+   - 若同時有水餃與辣油售完公告：一併告知兩項售完，其他品項照常
    - 若有門市臨時公告（售完／公休）：告知今日門市暫無供應，宅配照常可訂
    - 若有連假公告：告知連假期間門市與宅配均暫停，假期結束後恢復
    - 涉及具體數量等需人工判斷的問題，回覆：「這部分我幫您留言給客服，會盡快在 LINE 為您確認 😊」
@@ -604,6 +629,7 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
    - 電話號碼（04-25882881）：客人主動詢問電話、收到商品有緊急損壞問題、系統或物流緊急異常
 7. 不確定的事情不要捏造，說明客服會在 LINE 確認，讓客人安心等候
 8. 【購買意願必問】當客人表達購買意願時，第一步務必先詢問：「請問您是要門市自取，還是宅配到府呢？」確認後再收集對應資料，不可混用規則。
+   - 若客人已在同一則訊息中明確指定取貨方式（如「我要宅配 50 包」「自取 5 包」），直接進入對應資料收集流程，不得重複詢問。
    - 意圖判斷：客人回應含「問題」「詢問」「想問」「請問」等詞，代表客人是在**提問**而非確認取貨方式，應先了解問題再繼續；只有明確說「門市」「自取」「宅配」「到府」才算確認
    - 門市自取：收集 貴姓、電話、預計取貨日期/時間（三項，缺一不可）
    - 宅配：收集 全名、電話、收件地址、品項數量（四項缺一不可）；希望出貨日期可順帶詢問，但客服會再次確認，不強制等待
@@ -615,6 +641,7 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
 10. 【宅配時間說明】宅配客人若詢問幾天收到，務必說明：出貨日不等於收件日，正常收件為出貨日 +1 天；繁盛期除外。
 11. 【門市取貨時間驗證】收到客人提供的取貨時間後，必須核對是否落在營業時段內，再決定是否接單：
     營業時段：週一至六 08:00–13:30 / 16:00–18:00；週日 08:00–13:30；週四全日公休
+    - 判斷取貨日期的星期幾時，必須查閱系統提供的【日期星期對照表】，禁止自行推算
     - 時間符合：正常繼續收單流程
     - 時間不符（含週四、13:30–16:00 空檔、18:00 後、08:00 前）：婉轉告知該時段門市未開，請客人改約可取貨的時段，不得接受非營業時間的取貨訂單
     - 宅配訂單不受此規則限制，非營業時間仍可正常收單，出貨日由老闆確認
@@ -622,11 +649,13 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
    - 豆干絲門市：預設 60 元一般包裝；客人主動要求真空包才接單（70元，建議前一天預訂）
    - 昆布／花生門市：主動詢問 50 元或 100 元份量；客人主動要求真空包才接單（需提前預訂）
    - 油潑辣子：120 元/罐，若需 10 罐以上請先詢問老闆庫存
-13. 【付款確認回覆】客人提供匯款末四碼時（如直接傳「7489」、「末四碼 7489」、「已匯款」、「匯好了」等），回覆：「感謝您！末四碼已記錄，我們確認後會盡快安排出貨，有任何問題歡迎隨時詢問 😊」——不得再次顯示匯款帳號資訊。
+13. 【付款確認回覆】客人提供匯款末四碼時（如直接傳「7489」、「末四碼 7489」、「已匯款」、「匯好了」等），依訂單類型回覆，不得再次顯示匯款帳號資訊：
+    - 宅配訂單：「感謝您！末四碼已記錄，我們確認後會盡快安排出貨，有任何問題歡迎隨時詢問 😊」
+    - 門市自取訂單：「感謝您！末四碼已記錄，我們確認後會通知您取貨細節，有任何問題歡迎隨時詢問 😊」
 14. 【門市醬料主動提示】客人門市購買豆干絲 3 包時，主動告知「4 包以上醬料獨立包裝，方便保存，是否要多帶一包？」
-14. 【素食確認】若客人在對話中曾詢問過素食相關問題，回覆結尾務必再次確認：「請問您是素食者嗎？以便我們為您備餐。」素食者可食：豆干絲、天然昆布、香滷花生、油潑辣子；水餃含豬肉，素食者不可食。
-15. 【門市無餐具】客人詢問門市是否提供餐具，回覆：門市不提供餐具，請自行準備。
-16. 【禁止回答範圍（絕對執行）】以下一律回覆「不好意思，我只能回答老鄰居豆干絲的相關問題喔 😊」，不得有任何例外：
+15. 【素食確認】若客人詢問素食相關問題，且尚未確認是否為素食者，在**收集訂單資料期間**詢問一次即可：「請問您是素食者嗎？以便我們為您備餐。」訂單一旦成立或客人已明確表示是否素食，不得再重複詢問。素食者可食：豆干絲、天然昆布、香滷花生、油潑辣子；水餃含豬肉，素食者不可食。
+16. 【門市無餐具】客人詢問門市是否提供餐具，回覆：門市不提供餐具，請自行準備。
+17. 【禁止回答範圍（絕對執行）】以下一律回覆「不好意思，我只能回答老鄰居豆干絲的相關問題喔 😊」，不得有任何例外：
    - 競爭對手或其他店家的比較與評價
    - 政治、宗教、社會議題
    - 法律、醫療、財務建議
@@ -704,7 +733,8 @@ KEYWORD_RULES = [
      "  宅配 70 元（真空）/ 門市 60 元（一般）\n"
      "・香滷花生 210g → 100 元\n"
      "・天然昆布 160g → 100 元\n"
-     "・油潑辣子 250ml → 120 元\n\n"
+     "・油潑辣子 250ml → 120 元\n"
+     "・冷凍水餃（手工）→ 280 元／包\n\n"
      "需要試算含運費的總價嗎？告訴我數量就好 😊"),
 
     ("🚚 運費免運",
@@ -728,14 +758,13 @@ KEYWORD_RULES = [
      "（不支援貨到付款、信用卡、LINE Pay）"),
 
     ("📋 訂購方式",
-     ["怎麼訂", "如何訂", "要怎麼", "訂購方式", "下單方式"],
-     "訂購請提供以下資訊 📋\n"
-     "1. 收件人姓名\n"
-     "2. 收件地址\n"
-     "3. 聯絡電話\n"
-     "4. 品項與數量\n"
-     "5. 希望出貨日期\n\n"
-     "提供後我們會在 LINE 回覆匯款資訊，出貨前完成匯款即可 😊"),
+     ["怎麼訂", "如何訂", "要怎麼訂", "要怎麼買", "要怎麼購買", "訂購方式", "下單方式"],
+     "我們提供兩種取貨方式 😊\n\n"
+     "🚚 宅配\n"
+     "請提供：收件人姓名、收件地址、聯絡電話、品項與數量、希望出貨日期\n\n"
+     "🏪 門市自取\n"
+     "請提供：姓名、聯絡電話、品項與數量、希望取貨日期\n\n"
+     "請問您想選哪種方式呢？"),
 
     ("📍 門市地址",
      ["門市在哪", "門市地址", "門市位置", "門市怎麼去", "怎麼去門市", "實體店", "店在哪", "怎麼找"],
@@ -792,36 +821,6 @@ def extract_order(text):
         return PICKUP_TAG.sub("", text).strip(), "pickup", m.group(1).strip()
     return text, None, None
 
-
-def notify_owner(customer_uid, order_type, order_summary):
-    """用 Push Message 推播新訂單給老闆。"""
-    if not OWNER_LINE_UID:
-        return
-    if order_type == "pickup":
-        header = "🏪 門市自取通知"
-        footer = "請確認取貨時間並備料 ✅"
-    else:
-        header = "🔔 宅配新訂單通知"
-        footer = "請盡快確認訂單並安排出貨日期 ✅"
-    msg = (
-        f"{header}\n\n"
-        f"摘要：{order_summary}\n"
-        f"客戶 LINE UID：\n{customer_uid}\n\n"
-        f"{footer}"
-    )
-    try:
-        r = requests.post(
-            "https://api.line.me/v2/bot/message/push",
-            headers={"Authorization": f"Bearer {LINE_TOKEN}"},
-            json={"to": OWNER_LINE_UID, "messages": [{"type": "text", "text": msg}]},
-            timeout=10,
-        )
-        if not r.ok:
-            print(f"[ERROR] notify_owner failed {r.status_code}: {r.text[:200]}")
-            print(f"[ERROR] 未送達訂單內容：{msg}")
-    except Exception as e:
-        print(f"[ERROR] notify_owner exception: {e}")
-        print(f"[ERROR] 未送達訂單內容：{msg}")
 
 
 def _track_faq(label: str):
@@ -995,6 +994,9 @@ def _maybe_push_address_reminder(uid: str, msg: str, claude_reply: str):
     # Claude 的回覆已問地址 → 不重複
     if "地址" in claude_reply or "收件" in claude_reply:
         return
+    # Claude 的回覆是自取流程 → 不推宅配提醒
+    if any(kw in claude_reply for kw in ("自取", "門市", "取貨")):
+        return
     # 近期對話已提供地址 → 不需提醒
     if _has_address_in_history(uid):
         return
@@ -1043,46 +1045,6 @@ def register_customer(uid: str):
     _redis(["SADD", "customers", uid])
 
 
-def multicast(uids: list, messages):
-    """LINE Multicast API：一次最多 500 人，超過自動分批。"""
-    if isinstance(messages, str):
-        messages = [{"type": "text", "text": messages}]
-    for i in range(0, len(uids), 500):
-        batch = uids[i:i + 500]
-        try:
-            r = requests.post(
-                "https://api.line.me/v2/bot/message/multicast",
-                headers={"Authorization": f"Bearer {LINE_TOKEN}"},
-                json={"to": batch, "messages": messages},
-                timeout=30,
-            )
-            if not r.ok:
-                print(f"[WARN] multicast failed {r.status_code}: {r.text[:200]}")
-        except Exception as e:
-            print(f"[WARN] multicast exception: {e}")
-
-
-def build_image_messages(url: str, caption: str = "") -> list:
-    """組合圖片（+ 選填文字說明）的 LINE message list。"""
-    msgs = []
-    if caption:
-        msgs.append({"type": "text", "text": caption})
-    msgs.append({
-        "type": "image",
-        "originalContentUrl": url,
-        "previewImageUrl": url,
-    })
-    return msgs
-
-
-def broadcast_to_all(messages) -> int:
-    """推播給所有客戶，回傳實際推播人數。messages 可以是字串或 LINE message list。"""
-    result = _redis(["SMEMBERS", "customers"])
-    uids = list(result) if result else list(_local_customers)
-    if not uids:
-        return 0
-    multicast(uids, messages)
-    return len(uids)
 
 
 def is_share_request(text):
@@ -1124,7 +1086,7 @@ _MODELS = [
 
 def _call_claude(history: list) -> str:
     """依序嘗試 _MODELS，第一個成功的回傳結果；全部失敗才丟例外。"""
-    extras = [s for s in (store_status_text(), dumpling_soldout_text()) if s]
+    extras = [s for s in (store_status_text(), dumpling_soldout_text(), chili_soldout_text()) if s]
     system_blocks = [
         {"type": "text", "text": SYSTEM_TEXT,
          "cache_control": {"type": "ephemeral"}},
@@ -1165,9 +1127,8 @@ def ask(uid, msg):
     except Exception:
         return "很抱歉，系統暫時忙碌，請稍後再試或直撥 04-25882881", False
 
-    clean, order_type, order_info = extract_order(raw)
+    clean, _, order_info = extract_order(raw)
     if order_info:
-        notify_owner(uid, order_type, order_info)
         set_has_order(uid)
 
     history.append({"role": "assistant", "content": clean})
@@ -1311,9 +1272,24 @@ def store_admin():
             "<h2>✅ 水餃已恢復供應</h2>"
             f"<p><a href='/store?token={token}'>← 返回管理頁</a></p>"
         )
+    elif action == "chili_close":
+        set_chili_soldout()
+        return (
+            "<h2>✅ 辣油售完已啟動</h2>"
+            "<p>客人詢問辣油時將告知售完。</p>"
+            "<p>其他品項不受影響，需手動恢復。</p>"
+            f"<p><a href='/store?token={token}'>← 返回管理頁</a></p>"
+        )
+    elif action == "chili_open":
+        clear_chili_soldout()
+        return (
+            "<h2>✅ 辣油已恢復供應</h2>"
+            f"<p><a href='/store?token={token}'>← 返回管理頁</a></p>"
+        )
     else:
         store_msg  = store_status_text()
         dump_msg   = dumpling_soldout_text()
+        chili_msg  = chili_soldout_text()
         store_html = (
             "<p style='color:red;font-weight:bold'>🔴 門市停單中，宅配照常</p>"
             if store_msg else
@@ -1324,10 +1300,16 @@ def store_admin():
             if dump_msg else
             "<p style='color:green;font-weight:bold'>🟢 水餃供應正常</p>"
         )
+        chili_html = (
+            "<p style='color:orange;font-weight:bold'>🟠 油潑辣子售完</p>"
+            if chili_msg else
+            "<p style='color:green;font-weight:bold'>🟢 油潑辣子供應正常</p>"
+        )
         return (
             "<h2>老鄰居門市管理</h2>"
             f"{store_html}"
             f"{dump_html}"
+            f"{chili_html}"
             "<hr>"
             "<h3>門市接單</h3>"
             f"<p><a href='/store?action=close&token={token}&reason=今日提前售完'>🔴 今日提前售完</a></p>"
@@ -1345,6 +1327,10 @@ def store_admin():
             "<h3>水餃</h3>"
             f"<p><a href='/store?action=dumpling_close&token={token}'>🟠 水餃售完（需手動恢復）</a></p>"
             f"<p><a href='/store?action=dumpling_open&token={token}'>🟢 水餃恢復供應</a></p>"
+            "<hr>"
+            "<h3>油潑辣子</h3>"
+            f"<p><a href='/store?action=chili_close&token={token}'>🟠 辣油售完（需手動恢復）</a></p>"
+            f"<p><a href='/store?action=chili_open&token={token}'>🟢 辣油恢復供應</a></p>"
         )
 
 
