@@ -851,6 +851,8 @@ def cache_key(text):
 
 def _daily_allowed(uid: str) -> bool:
     """檢查今日 Claude 呼叫額度並計數。允許則回 True，超限則回 False。"""
+    if uid == OWNER_LINE_UID:
+        return True
     today      = _today_str()
     uid_key    = f"dlimit:{uid}:{today}"
     global_key = f"dlimit:global:{today}"
@@ -1162,6 +1164,7 @@ def webhook():
             token = e["replyToken"]
             uid   = e["source"]["userId"]
             # ── 自動記錄客戶名單 ─────────────────────────────────────────────
+            print(f"[UID] {uid}")  # 暫時：取得 UID 後請刪除此行
             register_customer(uid)
 
             now = time.time()
