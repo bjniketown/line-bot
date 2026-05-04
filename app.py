@@ -105,6 +105,11 @@ def current_date_text() -> str:
         f"現在台灣時間：{now.strftime('%Y年%m月%d日')} "
         f"{_WEEKDAYS[now.weekday()]} {now.strftime('%H:%M')}"
     )
+    # 未來 30 天日期對照表，供 Claude 直接查詢，禁止自行推算星期
+    calendar = "【日期星期對照表，查表用，禁止自行推算】\n" + "  ".join(
+        f"{(now + timedelta(days=i)).strftime('%m/%d')}({_WEEKDAYS[(now + timedelta(days=i)).weekday()]})"
+        for i in range(1, 31)
+    )
     try:
         is_open, open_msg = _is_open_now()
         status = "✅ 門市目前營業中" if is_open else (
@@ -112,9 +117,9 @@ def current_date_text() -> str:
             f"禁止引導客人今日前往門市取貨，應詢問是否改約其他營業時間；"
             f"宅配訂單不受影響，非營業時間仍可正常收單。"
         )
-        return f"{base}\n{status}"
+        return f"{base}\n{status}\n{calendar}"
     except Exception:
-        return base
+        return f"{base}\n{calendar}"
 
 def _seconds_until_midnight() -> int:
     now = datetime.now(_TZ_TW)
