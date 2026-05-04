@@ -239,6 +239,39 @@ def clear_has_order(uid: str):
     """清除訂單旗標（配合清除記憶使用）。"""
     _redis(["DEL", f"has_order:{uid}"])
 
+def get_customer_profile(uid: str) -> dict:
+    """取得客人資料（姓名、電話、地址）。"""
+    if not UPSTASH_URL:
+        return {}
+    raw = _redis(["GET", f"profile:{uid}"])
+    if raw:
+        try:
+            return json.loads(raw)
+        except Exception:
+            pass
+    return {}
+
+def save_customer_profile(uid: str, profile: dict):
+    """儲存客人資料，TTL 一年。"""
+    _redis(["SET", f"profile:{uid}", json.dumps(profile, ensure_ascii=False), "EX", 31536000])
+
+def customer_profile_text(uid: str) -> str:
+    """回傳客人資料提示，供每次呼叫 Claude 時動態注入。"""
+    p = get_customer_profile(uid)
+    if not p:
+        return ""
+    lines = ["【回訪客人資料（系統自動帶入）】"]
+    if p.get("name"):
+        lines.append(f"姓名：{p['name']}")
+    if p.get("phone"):
+        lines.append(f"電話：{p['phone']}")
+    if p.get("address"):
+        lines.append(f"上次宅配地址：{p['address']}")
+        lines.append("→ 若客人選擇宅配，主動詢問「是否沿用上次的收件資料？」，客人確認後直接使用，不需重複收集。")
+    else:
+        lines.append("→ 此客人為門市自取客人，可沿用姓名與電話，地址需重新收集。")
+    return "\n".join(lines)
+
 def _today_str() -> str:
     return datetime.now(_TZ_TW).strftime("%Y-%m-%d")
 
@@ -679,8 +712,8 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
   ────────────────
   請於出貨前完成匯款，並在 LINE 回傳末四碼 📲
 
-  <<ORDER:姓名|電話|品項簡述>>
-  例：<<ORDER:王小明|0912345678|豆干絲30包>>
+  <<ORDER:姓名|電話|收件地址|品項簡述>>
+  例：<<ORDER:王小明|0912345678|台北市中正區忠孝東路1號|豆干絲30包>>
 
 ▶ 門市自取訂單：當客戶提供以下三項資料（缺一不可），在回覆最後一行加上標記：
   付款方式：現場現金支付，不主動提及匯款選項
@@ -1084,9 +1117,10 @@ _MODELS = [
     "claude-haiku-3-5-20241022",  # fallback 2：上一代 haiku
 ]
 
-def _call_claude(history: list) -> str:
+def _call_claude(history: list, uid: str = "") -> str:
     """依序嘗試 _MODELS，第一個成功的回傳結果；全部失敗才丟例外。"""
-    extras = [s for s in (store_status_text(), dumpling_soldout_text(), chili_soldout_text()) if s]
+    extras = [s for s in (store_status_text(), dumpling_soldout_text(), chili_soldout_text(),
+                          customer_profile_text(uid)) if s]
     system_blocks = [
         {"type": "text", "text": SYSTEM_TEXT,
          "cache_control": {"type": "ephemeral"}},
@@ -1119,7 +1153,7 @@ def ask(uid, msg):
     history.append({"role": "user", "content": msg})
     history = history[-10:]
     try:
-        raw = _call_claude(history)
+        raw = _call_claude(history, uid)
     except anthropic.APIStatusError as e:
         if "credit" in str(e).lower() or e.status_code == 529:
             return "很抱歉，服務暫時無法使用，請直撥 04-25882881", False
@@ -1127,9 +1161,24 @@ def ask(uid, msg):
     except Exception:
         return "很抱歉，系統暫時忙碌，請稍後再試或直撥 04-25882881", False
 
-    clean, _, order_info = extract_order(raw)
+    clean, order_type, order_info = extract_order(raw)
     if order_info:
         set_has_order(uid)
+        parts = order_info.split("|")
+        if order_type == "order" and len(parts) >= 3:
+            save_customer_profile(uid, {
+                "name": parts[0].strip(),
+                "phone": parts[1].strip(),
+                "address": parts[2].strip(),
+            })
+        elif order_type == "pickup" and len(parts) >= 2:
+            existing = get_customer_profile(uid)
+            save_customer_profile(uid, {
+                **existing,
+                "name": parts[0].strip(),
+                "phone": parts[1].strip(),
+                "address": existing.get("address", ""),
+            })
 
     history.append({"role": "assistant", "content": clean})
     set_history(uid, history)
