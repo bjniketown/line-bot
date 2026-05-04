@@ -198,6 +198,20 @@ def dumpling_soldout_text() -> str:
         )
     return ""
 
+def set_has_order(uid: str):
+    """標記此客戶已有成立訂單，24 小時內跳過關鍵字攔截。"""
+    _redis(["SET", f"has_order:{uid}", "1", "EX", 86400])
+
+def get_has_order(uid: str) -> bool:
+    """檢查此客戶是否已有成立訂單。"""
+    if not UPSTASH_URL:
+        return False
+    return _redis(["EXISTS", f"has_order:{uid}"]) == 1
+
+def clear_has_order(uid: str):
+    """清除訂單旗標（配合清除記憶使用）。"""
+    _redis(["DEL", f"has_order:{uid}"])
+
 def _today_str() -> str:
     return datetime.now(_TZ_TW).strftime("%Y-%m-%d")
 
@@ -840,12 +854,17 @@ def quick_rule_reply(text, uid=None):
                                "今日營業", "今天公休", "今天休息")):
         _, msg = _is_open_now()
         return msg
-    # 訂單提交 / 付款確認 → 讓 Claude 依對話脈絡處理，不觸發關鍵字規則
+    # 訂單提交 / 付款確認 / 修改意圖 → 讓 Claude 依對話脈絡處理，不觸發關鍵字規則
     if any(kw in t for kw in ("收件人", "收件地址", "訂購數量", "訂購品項")):
+        return None
+    if re.search(r'修改|更改|變更|改成|改為', t) and any(kw in t for kw in ("運費", "金額", "總計", "價格", "費用")):
         return None
     if ("末四碼" in t
             or re.search(r'已匯[款]?|匯好[了]?|付好[了]?|轉好[了]?', t)
             or re.fullmatch(r'\d{4}', t)):
+        return None
+    # 已成立訂單 → 跳過關鍵字規則，讓 Claude 依對話脈絡處理後續問題
+    if uid and get_has_order(uid):
         return None
     # 關鍵字比對（先做，避免「運費」等2字關鍵字被2字規則誤攔）
     for label, keywords, reply_text in KEYWORD_RULES:
@@ -1126,6 +1145,7 @@ def ask(uid, msg):
     clean, order_type, order_info = extract_order(raw)
     if order_info:
         notify_owner(uid, order_type, order_info)
+        set_has_order(uid)
 
     history.append({"role": "assistant", "content": clean})
     set_history(uid, history)
@@ -1192,6 +1212,7 @@ def webhook():
             # ── 快速回覆（不呼叫 Claude）→ 直接 reply，立即送出 ──────────
             if is_reset_request(text):
                 set_history(uid, [])
+                clear_has_order(uid)
                 reply(token, "好的！對話記憶已清除，我們重新開始 😊 請問有什麼可以幫您的嗎？")
                 continue
 
