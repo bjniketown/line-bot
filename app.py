@@ -272,6 +272,51 @@ def customer_profile_text(uid: str) -> str:
         lines.append("→ 此客人為門市自取客人，可沿用姓名與電話，地址需重新收集。")
     return "\n".join(lines)
 
+def get_shipping_full_dates() -> set:
+    """取得排程滿檔日期，自動清除過期項目。"""
+    raw = _redis(["SMEMBERS", "shipping_full"])
+    if not raw or not isinstance(raw, list):
+        return set()
+    today = datetime.now(_TZ_TW).strftime("%Y-%m-%d")
+    valid, expired = [], []
+    for d in raw:
+        s = str(d)
+        (valid if s >= today else expired).append(s)
+    if expired:
+        _redis(["SREM", "shipping_full"] + expired)
+    return set(valid)
+
+def set_shipping_full(date_str: str):
+    _redis(["SADD", "shipping_full", date_str])
+
+def clear_shipping_full(date_str: str):
+    _redis(["SREM", "shipping_full", date_str])
+
+def shipping_schedule_text() -> str:
+    """回傳宅配排程注入文字，永遠注入，讓 Claude 自動安排出貨日。"""
+    full = get_shipping_full_dates()
+    now  = datetime.now(_TZ_TW)
+    full_labels, avail_labels = [], []
+    for i in range(1, 22):
+        d = now + timedelta(days=i)
+        if d.weekday() not in {0, 2, 4}:
+            continue
+        key   = d.strftime("%Y-%m-%d")
+        label = f"{d.month}/{d.day:02d}（{_WEEKDAYS[d.weekday()]}）"
+        (full_labels if key in full else avail_labels).append(label)
+    avail_str = "、".join(avail_labels[:6]) if avail_labels else "暫無"
+    lines = [f"【宅配排程】近期可出貨日：{avail_str}。"]
+    if full_labels:
+        lines.append(f"排程已滿（不可安排）：{'、'.join(full_labels)}。")
+    lines.append(
+        "出貨日安排規則（無需人工確認，直接在回覆中告知）："
+        "(1) 客人指定可出貨日 → 直接確認；"
+        "(2) 客人指定滿檔日 → 告知排程已滿，改推薦最近可出貨日；"
+        "(3) 客人未指定 → 主動安排最近一個可出貨日並告知。"
+        "同時告知預計收件日（出貨日 +1 天）。"
+    )
+    return "\n".join(lines)
+
 def _today_str() -> str:
     return datetime.now(_TZ_TW).strftime("%Y-%m-%d")
 
@@ -362,17 +407,20 @@ SYSTEM_TEXT = """你是「老鄰居豆干絲」的 LINE 客服助理，請用繁
   - 餘數 10 以上（60、65 單位等）→ 不提醒
 
 【金額回覆格式，強制執行】
-確認訂單金額時，禁止先列「小計」再解釋運費——此格式容易讓客人誤以為小計是最終金額。
-直接呈現：品項清單 → 一句運費說明 → 總金額，不得出現「小計」欄位。
+確認訂單金額時，嚴格禁止以下兩種格式：
+1. 逐項列出「× 單價 = 金額」的明細計算
+2. 出現「小計」欄位
 
-❌ 禁用格式：
-・小計：3,620 元
-・運費計算：51÷50＝1箱餘1 → 225元
-・總金額：3,845 元
+直接呈現：品項清單（含數量）→ 一句運費說明 → 總金額，不得有任何中間計算過程。
+
+❌ 禁用格式（以下兩種都不可以）：
+・招牌豆干絲 20 包 × 70 元 = 1,400 元
+・香滷花生 2 份 × 100 元 = 200 元
+・小計：1,600 元 / 運費計算：22 單位 → 225 元 / 總金額：1,825 元
 
 ✅ 正確格式：
-・豆干絲 50 包、油潑辣子 1 罐（共 51 單位，運費 225 元）
-・**總金額：3,845 元**
+・招牌豆干絲 20 包、香滷花生 2 份（共 22 單位，運費 225 元）
+・**總金額：1,825 元**
 
 所有品項可混搭合算（油潑辣子 1 罐 = 1 單位）
 ⚠️ 【混搭運費鐵則，絕對不可違反】
@@ -409,7 +457,7 @@ SYSTEM_TEXT = """你是「老鄰居豆干絲」的 LINE 客服助理，請用繁
 2. 收件地址
 3. 聯絡電話
 4. 訂購品項與數量
-5. 希望出貨日期（選填，收件日為出貨日 +1 天；繁盛期除外）—— 客服會再次確認可行性
+5. 希望出貨日期（選填）——依後台排程自動安排，訂單成立時主動告知出貨日與預計收件日，無需人工確認
 
 ▶ 門市自取客戶（三項即可）：
 1. 貴姓
@@ -460,7 +508,7 @@ Q: 1 罐油潑辣子算幾單位？
 A: 1 罐算 1 單位，可與豆干絲等其他品項合計計算是否達免運門檻。
 
 Q: 最快什麼時候出貨？
-A: 我們通常週一、三、五出貨，請告訴我您希望的出貨日，我幫您記錄下來，客服確認後會在 LINE 通知您 😊
+A: 依系統排程告知最近可出貨日，並說明預計收件日為出貨日隔天。
 
 Q: 出貨後幾天可以收到？
 A: 一般出貨隔天可收件；繁盛期可能需 1–2 個工作天。
@@ -665,7 +713,7 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
    - 若客人已在同一則訊息中明確指定取貨方式（如「我要宅配 50 包」「自取 5 包」），直接進入對應資料收集流程，不得重複詢問。
    - 意圖判斷：客人回應含「問題」「詢問」「想問」「請問」等詞，代表客人是在**提問**而非確認取貨方式，應先了解問題再繼續；只有明確說「門市」「自取」「宅配」「到府」才算確認
    - 門市自取：收集 貴姓、電話、預計取貨日期/時間（三項，缺一不可）
-   - 宅配：收集 全名、電話、收件地址、品項數量（四項缺一不可）；希望出貨日期可順帶詢問，但客服會再次確認，不強制等待
+   - 宅配：收集 全名、電話、收件地址、品項數量（四項缺一不可）；訂單成立後依排程自動安排出貨日，直接在確認回覆中告知，無需等待客服確認
 9. 【電話格式驗證】收集客人電話時，靜默檢查格式是否符合台灣規格：
    - 手機：09 開頭，共 10 碼（例：0912-345-678）
    - 市話：區碼 02–08 開頭，共 9–10 碼（例：04-2588-2881）
@@ -677,18 +725,23 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
     - 判斷取貨日期的星期幾時，必須查閱系統提供的【日期星期對照表】，禁止自行推算
     - 時間符合：正常繼續收單流程
     - 時間不符（含週四、13:30–16:00 空檔、18:00 後、08:00 前）：婉轉告知該時段門市未開，請客人改約可取貨的時段，不得接受非營業時間的取貨訂單
-    - 宅配訂單不受此規則限制，非營業時間仍可正常收單，出貨日由老闆確認
-12. 【門市取貨包裝】門市自取預設一般包裝，不主動詢問是否需要真空包；宅配一律真空包裝，不需詢問。
+    - 宅配訂單不受此規則限制，非營業時間仍可正常收單
+12. 【宅配出貨日自動安排】訂單成立時，依系統注入的【宅配排程】自動決定出貨日，直接在確認回覆中告知，不得說「客服確認後通知」：
+    - 客人有指定日期且可出貨 → 直接確認該日
+    - 客人指定日期排程已滿 → 告知該日排程已滿，改為最近可出貨日
+    - 客人未指定 → 主動安排最近可出貨日
+    - 同時告知預計收件日（出貨日 +1 天）
+13. 【門市取貨包裝】門市自取預設一般包裝，不主動詢問是否需要真空包；宅配一律真空包裝，不需詢問。
    - 豆干絲門市：預設 60 元一般包裝；客人主動要求真空包才接單（70元，建議前一天預訂）
    - 昆布／花生門市：主動詢問 50 元或 100 元份量；客人主動要求真空包才接單（需提前預訂）
    - 油潑辣子：120 元/罐，若需 10 罐以上請先詢問老闆庫存
-13. 【付款確認回覆】客人提供匯款末四碼時（如直接傳「7489」、「末四碼 7489」、「已匯款」、「匯好了」等），依訂單類型回覆，不得再次顯示匯款帳號資訊：
+14. 【付款確認回覆】客人提供匯款末四碼時（如直接傳「7489」、「末四碼 7489」、「已匯款」、「匯好了」等），依訂單類型回覆，不得再次顯示匯款帳號資訊：
     - 宅配訂單：「感謝您！末四碼已記錄，我們確認後會盡快安排出貨，有任何問題歡迎隨時詢問 😊」
     - 門市自取訂單：「感謝您！末四碼已記錄，我們確認後會通知您取貨細節，有任何問題歡迎隨時詢問 😊」
-14. 【門市醬料主動提示】客人門市購買豆干絲 3 包時，主動告知「4 包以上醬料獨立包裝，方便保存，是否要多帶一包？」
-15. 【素食確認】若客人詢問素食相關問題，且尚未確認是否為素食者，在**收集訂單資料期間**詢問一次即可：「請問您是素食者嗎？以便我們為您備餐。」訂單一旦成立或客人已明確表示是否素食，不得再重複詢問。素食者可食：豆干絲、天然昆布、香滷花生、油潑辣子；水餃含豬肉，素食者不可食。
-16. 【門市無餐具】客人詢問門市是否提供餐具，回覆：門市不提供餐具，請自行準備。
-17. 【禁止回答範圍（絕對執行）】以下一律回覆「不好意思，我只能回答老鄰居豆干絲的相關問題喔 😊」，不得有任何例外：
+15. 【門市醬料主動提示】客人門市購買豆干絲 3 包時，主動告知「4 包以上醬料獨立包裝，方便保存，是否要多帶一包？」
+16. 【素食確認】若客人詢問素食相關問題，且尚未確認是否為素食者，在**收集訂單資料期間**詢問一次即可：「請問您是素食者嗎？以便我們為您備餐。」訂單一旦成立或客人已明確表示是否素食，不得再重複詢問。素食者可食：豆干絲、天然昆布、香滷花生、油潑辣子；水餃含豬肉，素食者不可食。
+17. 【門市無餐具】客人詢問門市是否提供餐具，回覆：門市不提供餐具，請自行準備。
+18. 【禁止回答範圍（絕對執行）】以下一律回覆「不好意思，我只能回答老鄰居豆干絲的相關問題喔 😊」，不得有任何例外：
    - 競爭對手或其他店家的比較與評價
    - 政治、宗教、社會議題
    - 法律、醫療、財務建議
@@ -1120,7 +1173,7 @@ _MODELS = [
 def _call_claude(history: list, uid: str = "") -> str:
     """依序嘗試 _MODELS，第一個成功的回傳結果；全部失敗才丟例外。"""
     extras = [s for s in (store_status_text(), dumpling_soldout_text(), chili_soldout_text(),
-                          customer_profile_text(uid)) if s]
+                          shipping_schedule_text(), customer_profile_text(uid)) if s]
     system_blocks = [
         {"type": "text", "text": SYSTEM_TEXT,
          "cache_control": {"type": "ephemeral"}},
@@ -1275,112 +1328,200 @@ def ping():
     return "pong"
 
 
+_STORE_CSS = """<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f0f2f5;min-height:100vh}
+.wrap{max-width:480px;margin:0 auto;padding:16px 14px 32px}
+h1{font-size:18px;font-weight:700;color:#111;margin-bottom:14px}
+.card{background:#fff;border-radius:14px;padding:16px;margin-bottom:12px;box-shadow:0 1px 4px rgba(0,0,0,.07)}
+.card-label{font-size:11px;font-weight:700;color:#9ca3af;text-transform:uppercase;letter-spacing:.8px;margin-bottom:10px}
+.status-bar{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+.badge{padding:4px 12px;border-radius:99px;font-size:13px;font-weight:600}
+.bg-g{background:#dcfce7;color:#15803d}.bg-o{background:#ffedd5;color:#c2410c}.bg-r{background:#fee2e2;color:#b91c1c}
+.btn-row{display:flex;gap:8px;flex-wrap:wrap}
+.btn{padding:8px 14px;border-radius:9px;font-size:13px;font-weight:500;border:none;cursor:pointer;text-decoration:none;display:inline-block;line-height:1.4}
+.btn-r{background:#fee2e2;color:#b91c1c}.btn-g{background:#dcfce7;color:#15803d}.btn-o{background:#ffedd5;color:#c2410c}
+.sep{border:none;border-top:1px solid #f3f4f6;margin:12px 0}
+.hrow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:4px}
+.hrow label{font-size:13px;color:#6b7280}
+.hrow input{width:52px;padding:6px 8px;border:1.5px solid #d1d5db;border-radius:7px;font-size:13px;text-align:center}
+.mnav{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+.mnav-t{font-size:15px;font-weight:700;color:#111}
+.mnav-b{background:#f3f4f6;border:none;border-radius:7px;padding:5px 13px;font-size:16px;cursor:pointer;color:#374151}
+.slist{display:flex;flex-direction:column;gap:6px}
+.srow{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-radius:9px;border:1.5px solid #e5e7eb}
+.av{border-color:#86efac;background:#f0fdf4}.fl{border-color:#fca5a5;background:#fff5f5}.ps{border-color:#e5e7eb;background:#fafafa;opacity:.5}
+.hi{outline:2.5px solid #3b82f6;outline-offset:1px}
+.sd{display:flex;align-items:baseline;gap:5px}
+.sd-m{font-size:15px;font-weight:700;color:#111}.sd-w{font-size:13px;color:#6b7280}
+.td-p{font-size:10px;background:#3b82f6;color:#fff;padding:1px 7px;border-radius:99px;font-weight:600}
+.sr{display:flex;align-items:center;gap:8px}
+.ss{font-size:13px;font-weight:600}.av .ss{color:#15803d}.fl .ss{color:#b91c1c}.ps .ss{color:#9ca3af}
+.sb{font-size:12px;padding:4px 10px;border-radius:6px;border:none;cursor:pointer;font-weight:500}
+.av .sb{background:#fee2e2;color:#b91c1c}.fl .sb{background:#dcfce7;color:#15803d}
+.pv{background:#f8fafc;border-left:3px solid #94a3b8;border-radius:0 8px 8px 0;padding:10px 14px;margin-top:12px;font-size:13px;color:#475569;line-height:1.6}
+.pv-l{font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px}
+</style>"""
+
+_STORE_JS = """
+const WD=['日','一','二','三','四','五','六'],DEL=new Set([1,3,5]);
+let vY,vM;
+function toKey(d){return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')}
+function init(){const n=new Date();vY=n.getFullYear();vM=n.getMonth();render()}
+function changeMonth(x){vM+=x;if(vM>11){vM=0;vY++}else if(vM<0){vM=11;vY--}render()}
+function render(){
+  const now=new Date(),tk=toKey(now);
+  document.getElementById('mt').textContent=vY+'年'+(vM+1)+'月';
+  const sl=document.getElementById('sl');sl.innerHTML='';
+  const d=new Date(vY,vM,1);
+  while(d.getMonth()===vM){
+    if(DEL.has(d.getDay())){
+      const key=toKey(d),past=key<tk,today=key===tk,full=FD.has(key);
+      const cls=past?'ps':full?'fl':'av',stat=past?'已過':full?'🔴 排程滿檔':'✅ 可出貨';
+      const href='/store?token='+T+'&action='+(full?'shipping_open':'shipping_full')+'&date='+key;
+      const ds=(vM+1)+'/'+(d.getDate()+'').padStart(2,'0');
+      const row=document.createElement('div');
+      row.className='srow '+cls+(today?' hi':'');
+      row.innerHTML='<div class="sd"><span class="sd-m">'+ds+'</span><span class="sd-w">（'+WD[d.getDay()]+'）</span>'+(today?'<span class="td-p">今天</span>':'')+'</div>'
+        +'<div class="sr"><span class="ss">'+stat+'</span>'+(past?'':'<a class="sb" href="'+href+'">'+(full?'恢復出貨':'排程滿檔')+'</a>')+'</div>';
+      sl.appendChild(row);
+    }
+    d.setDate(d.getDate()+1);
+  }
+  updatePreview();
+}
+function updatePreview(){
+  const now=new Date(),fl=[],av=[];
+  for(let i=1;i<=21;i++){const d=new Date(now);d.setDate(d.getDate()+i);if(!DEL.has(d.getDay()))continue;
+    const key=toKey(d),lbl=(d.getMonth()+1)+'/'+(d.getDate()+'').padStart(2,'0')+'（'+WD[d.getDay()]+'）';
+    FD.has(key)?fl.push(lbl):av.push(lbl);}
+  let t='';
+  if(!fl.length)t='我們通常週一、三、五出貨，請告知希望的出貨日，客服確認後會在 LINE 通知您 😊';
+  else if(!av.length)t='很抱歉，近期出貨排程已滿，請稍後再詢問或聯絡客服確認 🙏';
+  else t=fl.join('、')+' 排程已滿，近期可出貨日為 '+av.slice(0,4).join('、')+'，收件日為出貨日隔天，請問您希望哪天呢？😊';
+  document.getElementById('pv').textContent=t;
+}
+init();
+"""
+
+def _redirect(token):
+    return f'<meta http-equiv="refresh" content="0;url=/store?token={token}"><body style="font-family:sans-serif;text-align:center;padding:40px">✅ 已更新，返回中...</body>'
+
 @app.route("/store")
 def store_admin():
-    """門市停單管理端點。書籤存到手機，點一下即可切換狀態。不經過 LINE。"""
-    token  = request.args.get("token", "")
-    action = request.args.get("action", "")
-    reason = request.args.get("reason", "今日提前售完")
-    days   = int(request.args.get("days", "1"))
+    """門市管理端點。書籤存到手機，點一下即可切換狀態。"""
+    token      = request.args.get("token", "")
+    action     = request.args.get("action", "")
+    reason     = request.args.get("reason", "今日提前售完")
+    days       = int(request.args.get("days", "1"))
+    date_param = request.args.get("date", "")
 
     if not ADMIN_TOKEN or token != ADMIN_TOKEN:
         abort(403)
 
     if action == "close":
         set_store_closed(reason, days)
-        if days <= 1:
-            expire_note = "今日午夜 00:00 自動恢復接單。"
-        else:
-            resume = datetime.now(_TZ_TW) + timedelta(days=days)
-            expire_note = f"預計 {resume.strftime('%m/%d')} 自動恢復接單（共 {days} 天）。"
-        return (
-            f"<h2>✅ 門市停單已啟動</h2>"
-            f"<p>原因：{reason}</p>"
-            f"<p>宅配不受影響，照常接單。</p>"
-            f"<p>{expire_note}</p>"
-            f"<p><a href='/store?token={token}'>← 返回管理頁</a></p>"
-        )
+        return _redirect(token)
     elif action == "open":
         clear_store_closed()
-        return (
-            "<h2>✅ 門市恢復接單</h2>"
-            "<p>門市取貨訂單已恢復正常。</p>"
-            f"<p><a href='/store?token={token}'>← 返回管理頁</a></p>"
-        )
+        return _redirect(token)
     elif action == "dumpling_close":
         set_dumpling_soldout()
-        return (
-            "<h2>✅ 水餃售完已啟動</h2>"
-            "<p>客人詢問水餃時將告知售完。</p>"
-            "<p>其他品項不受影響，需手動恢復。</p>"
-            f"<p><a href='/store?token={token}'>← 返回管理頁</a></p>"
-        )
+        return _redirect(token)
     elif action == "dumpling_open":
         clear_dumpling_soldout()
-        return (
-            "<h2>✅ 水餃已恢復供應</h2>"
-            f"<p><a href='/store?token={token}'>← 返回管理頁</a></p>"
-        )
+        return _redirect(token)
     elif action == "chili_close":
         set_chili_soldout()
-        return (
-            "<h2>✅ 辣油售完已啟動</h2>"
-            "<p>客人詢問辣油時將告知售完。</p>"
-            "<p>其他品項不受影響，需手動恢復。</p>"
-            f"<p><a href='/store?token={token}'>← 返回管理頁</a></p>"
-        )
+        return _redirect(token)
     elif action == "chili_open":
         clear_chili_soldout()
-        return (
-            "<h2>✅ 辣油已恢復供應</h2>"
-            f"<p><a href='/store?token={token}'>← 返回管理頁</a></p>"
-        )
-    else:
-        store_msg  = store_status_text()
-        dump_msg   = dumpling_soldout_text()
-        chili_msg  = chili_soldout_text()
-        store_html = (
-            "<p style='color:red;font-weight:bold'>🔴 門市停單中，宅配照常</p>"
-            if store_msg else
-            "<p style='color:green;font-weight:bold'>🟢 門市正常接單</p>"
-        )
-        dump_html = (
-            "<p style='color:orange;font-weight:bold'>🟠 今日水餃售完</p>"
-            if dump_msg else
-            "<p style='color:green;font-weight:bold'>🟢 水餃供應正常</p>"
-        )
-        chili_html = (
-            "<p style='color:orange;font-weight:bold'>🟠 油潑辣子售完</p>"
-            if chili_msg else
-            "<p style='color:green;font-weight:bold'>🟢 油潑辣子供應正常</p>"
-        )
-        return (
-            "<h2>老鄰居門市管理</h2>"
-            f"{store_html}"
-            f"{dump_html}"
-            f"{chili_html}"
-            "<hr>"
-            "<h3>門市接單</h3>"
-            f"<p><a href='/store?action=close&token={token}&reason=今日提前售完'>🔴 今日提前售完</a></p>"
-            f"<p><a href='/store?action=close&token={token}&reason=今日臨時公休'>🔴 今日臨時公休</a></p>"
-            "<p>🔴 連假停單：</p>"
-            f"<form action='/store' method='get' style='margin:0 0 8px 1em'>"
-            f"<input type='hidden' name='action' value='close'>"
-            f"<input type='hidden' name='token' value='{token}'>"
-            f"<input type='hidden' name='reason' value='連假期間暫停門市'>"
-            f"天數 <input type='number' name='days' value='3' min='1' max='30' style='width:50px'> 天"
-            f"&nbsp;<button type='submit'>確認停單</button>"
-            f"</form>"
-            f"<p><a href='/store?action=open&token={token}'>🟢 恢復門市接單</a></p>"
-            "<hr>"
-            "<h3>水餃</h3>"
-            f"<p><a href='/store?action=dumpling_close&token={token}'>🟠 水餃售完（需手動恢復）</a></p>"
-            f"<p><a href='/store?action=dumpling_open&token={token}'>🟢 水餃恢復供應</a></p>"
-            "<hr>"
-            "<h3>油潑辣子</h3>"
-            f"<p><a href='/store?action=chili_close&token={token}'>🟠 辣油售完（需手動恢復）</a></p>"
-            f"<p><a href='/store?action=chili_open&token={token}'>🟢 辣油恢復供應</a></p>"
-        )
+        return _redirect(token)
+    elif action == "shipping_full" and date_param:
+        set_shipping_full(date_param)
+        return _redirect(token)
+    elif action == "shipping_open" and date_param:
+        clear_shipping_full(date_param)
+        return _redirect(token)
+
+    store_msg  = store_status_text()
+    dump_msg   = dumpling_soldout_text()
+    chili_msg  = chili_soldout_text()
+    full_dates = get_shipping_full_dates()
+    import json as _j
+    fd_json    = _j.dumps(sorted(full_dates))
+
+    s_cls  = "bg-r" if store_msg  else "bg-g"
+    s_txt  = "🔴 門市停單中" if store_msg else "🟢 正常接單"
+    d_cls  = "bg-o" if dump_msg   else "bg-g"
+    d_txt  = "🟠 今日售完"   if dump_msg  else "🟢 供應正常"
+    c_cls  = "bg-o" if chili_msg  else "bg-g"
+    c_txt  = "🟠 目前售完"   if chili_msg else "🟢 供應正常"
+
+    return (
+        "<!DOCTYPE html><html lang='zh-Hant'><head>"
+        "<meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>老鄰居門市管理</title>" + _STORE_CSS +
+        "</head><body><div class='wrap'>"
+        "<h1>🏪 老鄰居門市管理</h1>"
+
+        # ── 門市接單 ──────────────────────────────────────────────────
+        "<div class='card'>"
+        "<div class='card-label'>門市接單</div>"
+        "<div class='status-bar'><span style='font-size:14px;color:#374151'>目前狀態</span>"
+        f"<span class='badge {s_cls}'>{s_txt}</span></div>"
+        "<div class='btn-row'>"
+        f"<a class='btn btn-r' href='/store?token={token}&action=close&reason=今日提前售完'>今日提前售完</a>"
+        f"<a class='btn btn-r' href='/store?token={token}&action=close&reason=今日臨時公休'>今日臨時公休</a>"
+        f"<a class='btn btn-g' href='/store?token={token}&action=open'>恢復接單</a>"
+        "</div><hr class='sep'>"
+        "<div style='font-size:13px;color:#6b7280;margin-bottom:6px'>連假停單</div>"
+        f"<form class='hrow' action='/store' method='get'>"
+        f"<input type='hidden' name='token' value='{token}'>"
+        "<input type='hidden' name='action' value='close'>"
+        "<input type='hidden' name='reason' value='連假期間暫停門市'>"
+        "<label>停單</label>"
+        "<input type='number' name='days' value='3' min='1' max='30'>"
+        "<label>天</label>"
+        "<button class='btn btn-r' type='submit'>確認停單</button>"
+        "</form></div>"
+
+        # ── 水餃 ──────────────────────────────────────────────────────
+        "<div class='card'>"
+        "<div class='card-label'>水餃</div>"
+        "<div class='status-bar'><span style='font-size:14px;color:#374151'>目前狀態</span>"
+        f"<span class='badge {d_cls}'>{d_txt}</span></div>"
+        "<div class='btn-row'>"
+        f"<a class='btn btn-o' href='/store?token={token}&action=dumpling_close'>🟠 水餃售完</a>"
+        f"<a class='btn btn-g' href='/store?token={token}&action=dumpling_open'>🟢 恢復供應</a>"
+        "</div></div>"
+
+        # ── 油潑辣子 ──────────────────────────────────────────────────
+        "<div class='card'>"
+        "<div class='card-label'>油潑辣子</div>"
+        "<div class='status-bar'><span style='font-size:14px;color:#374151'>目前狀態</span>"
+        f"<span class='badge {c_cls}'>{c_txt}</span></div>"
+        "<div class='btn-row'>"
+        f"<a class='btn btn-o' href='/store?token={token}&action=chili_close'>🟠 辣油售完</a>"
+        f"<a class='btn btn-g' href='/store?token={token}&action=chili_open'>🟢 恢復供應</a>"
+        "</div></div>"
+
+        # ── 宅配排程 ──────────────────────────────────────────────────
+        "<div class='card'>"
+        "<div class='card-label'>📦 宅配排程</div>"
+        "<div class='mnav'>"
+        "<button class='mnav-b' onclick='changeMonth(-1)'>‹</button>"
+        "<span class='mnav-t' id='mt'></span>"
+        "<button class='mnav-b' onclick='changeMonth(1)'>›</button>"
+        "</div>"
+        "<div class='slist' id='sl'></div>"
+        "<div class='pv'><div class='pv-l'>機器人回覆預覽</div><span id='pv'></span></div>"
+        "</div>"
+
+        "</div>"
+        f"<script>const T='{token}',FD=new Set({fd_json});" + _STORE_JS +
+        "</script></body></html>"
+    )
 
 
 if __name__ == "__main__":
