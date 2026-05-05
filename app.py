@@ -225,6 +225,39 @@ def chili_soldout_text() -> str:
         )
     return ""
 
+def set_busy_season(reason: str, start: str, end: str):
+    """設定繁盛時期，格式 reason|start|end，到結束日隔天自動失效。"""
+    try:
+        end_dt  = datetime.strptime(end, "%Y-%m-%d").replace(
+            hour=23, minute=59, second=59, tzinfo=_TZ_TW)
+        ttl = max(60, int((end_dt - datetime.now(_TZ_TW)).total_seconds()))
+    except Exception:
+        ttl = 86400 * 30
+    _redis(["SET", "busy_season", f"{reason}|{start}|{end}", "EX", ttl])
+
+def clear_busy_season():
+    _redis(["DEL", "busy_season"])
+
+def get_busy_season() -> tuple[str, str, str]:
+    """回傳 (reason, start, end)，未設定時回傳空字串。"""
+    raw = _redis(["GET", "busy_season"]) or ""
+    parts = raw.split("|", 2)
+    if len(parts) == 3:
+        return parts[0], parts[1], parts[2]
+    return "", "", ""
+
+def busy_season_text() -> str:
+    """回傳繁盛時期注入文字，供每次呼叫 Claude 時動態注入。"""
+    reason, start, end = get_busy_season()
+    if not reason:
+        return ""
+    return (
+        f"【繁盛時期公告】目前為「{reason}」繁盛時期（{start} 至 {end}），"
+        f"物流較忙，無法保證指定到貨日。"
+        f"宅配客人詢問收件日期時，需主動提醒繁盛時期物流較忙，"
+        f"建議提早下單，不保證指定到貨日。"
+    )
+
 def set_has_order(uid: str):
     """標記此客戶已有成立訂單，24 小時內跳過關鍵字攔截。"""
     _redis(["SET", f"has_order:{uid}", "1", "EX", 86400])
@@ -728,10 +761,13 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
     - 時間不符（含週四、13:30–16:00 空檔、18:00 後、08:00 前）：婉轉告知該時段門市未開，請客人改約可取貨的時段，不得接受非營業時間的取貨訂單
     - 宅配訂單不受此規則限制，非營業時間仍可正常收單
 13. 【宅配出貨日自動安排】訂單成立時，依系統注入的【宅配排程】自動決定出貨日，直接在確認回覆中告知，不得說「客服確認後通知」：
-    - 客人有指定日期且可出貨 → 直接確認該日
-    - 客人指定日期排程已滿 → 告知該日排程已滿，改為最近可出貨日
+    - 客人有指定出貨日且可出貨 → 直接確認該日
+    - 客人指定出貨日排程已滿 → 告知該日排程已滿，改為最近可出貨日
     - 客人未指定 → 主動安排最近可出貨日
     - 同時告知預計收件日（出貨日 +1 天）
+    - 【客人指定收件日】若客人說的是「收件日」（如「5/13 收到」），需反推出貨日（收件日 -1 天），確認該日是否為可出貨日（週一、三、五）：
+      - 反推出貨日可出貨 → 直接確認
+      - 反推出貨日不可出貨（非週一三五，或排程已滿）→ 必須告知無法在該日收件，並列出最近兩個可選方案（含各自出貨日與收件日）請客人選擇，不可直接改期而不說明
     - 【週五出貨特別提醒，強制執行】出貨日為週五時，必須在訂單確認回覆中加上提醒：
       「⚠️ 週五出貨、週六收件，若週六無人在家，黑貓週日不配送，最快週一才會再次配送，可能影響豆干絲新鮮度，請問週六方便收件嗎？若不方便，建議改為週一或週三出貨。」
 14. 【門市取貨包裝】門市自取預設一般包裝，絕對不可主動詢問客人要一般包還是真空包，直接以一般包裝計價；宅配一律真空包裝，不需詢問。
@@ -1269,7 +1305,7 @@ _MODELS = [
 def _call_claude(history: list, uid: str = "") -> str:
     """依序嘗試 _MODELS，第一個成功的回傳結果；全部失敗才丟例外。"""
     extras = [s for s in (store_status_text(), dumpling_soldout_text(), chili_soldout_text(),
-                          shipping_schedule_text(), customer_profile_text(uid)) if s]
+                          busy_season_text(), shipping_schedule_text(), customer_profile_text(uid)) if s]
     system_blocks = [
         {"type": "text", "text": SYSTEM_TEXT,
          "cache_control": {"type": "ephemeral"}},
@@ -1456,6 +1492,7 @@ body{font-family:'PingFang TC','Heiti TC','Microsoft JhengHei',serif;background:
 .btn-r{background:var(--red);color:var(--white)}
 .btn-g{background:#1a6b1a;color:var(--white)}
 .btn-o{background:transparent;color:var(--red);border:1.5px solid var(--red)}
+.btn-gold{background:var(--gold);color:var(--white)}
 .sep{border:none;border-top:1px solid var(--tan);margin:12px 0}
 .hrow{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .hrow label{font-size:13px;color:var(--brown)}
@@ -1565,6 +1602,16 @@ def store_admin():
     elif action == "shipping_open" and date_param:
         clear_shipping_full(date_param)
         return _redirect(token)
+    elif action == "busy_season_set":
+        reason_param = request.args.get("reason", "").strip()
+        start_param  = request.args.get("start", "").strip()
+        end_param    = request.args.get("end", "").strip()
+        if reason_param and start_param and end_param:
+            set_busy_season(reason_param, start_param, end_param)
+        return _redirect(token)
+    elif action == "busy_season_clear":
+        clear_busy_season()
+        return _redirect(token)
 
     store_msg  = store_status_text()
     dump_msg   = dumpling_soldout_text()
@@ -1572,6 +1619,7 @@ def store_admin():
     full_dates = get_shipping_full_dates()
     import json as _j
     fd_json    = _j.dumps(sorted(full_dates))
+    bs_reason, bs_start, bs_end = get_busy_season()
 
     s_cls  = "bg-r" if store_msg  else "bg-g"
     s_txt  = "🔴 門市停單中" if store_msg else "🟢 正常接單"
@@ -1579,6 +1627,8 @@ def store_admin():
     d_txt  = "🟠 今日售完"   if dump_msg  else "🟢 供應正常"
     c_cls  = "bg-o" if chili_msg  else "bg-g"
     c_txt  = "🟠 目前售完"   if chili_msg else "🟢 供應正常"
+    bs_cls = "bg-o" if bs_reason  else "bg-g"
+    bs_txt = f"🟠 {bs_reason}（{bs_start} 至 {bs_end}）" if bs_reason else "🟢 目前非繁盛時期"
 
     now_tw  = datetime.now(_TZ_TW)
     weekday_names = ["一","二","三","四","五","六","日"]
@@ -1664,6 +1714,41 @@ def store_admin():
         "</div>"
         "<div class='slist' id='sl'></div>"
         "<div class='pv'><div class='pv-l'>機器人回覆預覽</div><span id='pv'></span></div>"
+        "</div></div>"
+
+        # ── 繁盛時期 ──────────────────────────────────────────────────
+        "<div class='sec-t'>繁盛時期</div>"
+        "<div class='card'>"
+        "<div class='card-hd'>"
+        "<span class='card-nm'>物流繁忙警示</span>"
+        f"<span class='badge {bs_cls}'>{bs_txt}</span>"
+        "</div>"
+        "<div class='card-bd'>"
+        f"<form action='/store' method='get'>"
+        f"<input type='hidden' name='token' value='{token}'>"
+        "<input type='hidden' name='action' value='busy_season_set'>"
+        "<div style='display:flex;flex-direction:column;gap:8px'>"
+        "<div style='display:flex;align-items:center;gap:8px'>"
+        "<label style='font-size:13px;color:var(--brown);width:36px'>原因</label>"
+        f"<input name='reason' type='text' placeholder='例：春節假期' value='{bs_reason}' "
+        "style='flex:1;padding:7px 10px;border:1.5px solid var(--tan);border-radius:7px;font-size:13px;font-family:inherit;background:var(--cream);color:var(--ink)'>"
+        "</div>"
+        "<div style='display:flex;align-items:center;gap:8px'>"
+        "<label style='font-size:13px;color:var(--brown);width:36px'>開始</label>"
+        f"<input name='start' type='date' value='{bs_start}' "
+        "style='flex:1;padding:7px 10px;border:1.5px solid var(--tan);border-radius:7px;font-size:13px;font-family:inherit;background:var(--cream);color:var(--ink)'>"
+        "</div>"
+        "<div style='display:flex;align-items:center;gap:8px'>"
+        "<label style='font-size:13px;color:var(--brown);width:36px'>結束</label>"
+        f"<input name='end' type='date' value='{bs_end}' "
+        "style='flex:1;padding:7px 10px;border:1.5px solid var(--tan);border-radius:7px;font-size:13px;font-family:inherit;background:var(--cream);color:var(--ink)'>"
+        "</div>"
+        "<div class='btn-row' style='margin-top:4px'>"
+        "<button class='btn btn-gold' type='submit'>設定繁盛時期</button>"
+        f"<a class='btn btn-o' href='/store?token={token}&action=busy_season_clear'>取消繁盛時期</a>"
+        "</div>"
+        "</div>"
+        "</form>"
         "</div></div>"
 
         "<div class='footer'>老鄰居豆干絲 · 東勢美食街</div>"
