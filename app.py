@@ -921,6 +921,15 @@ def _parse_items_from_response(text: str) -> list:
                 items.append((name, qty, price, unit))
     return items
 
+def _insert_after_total_line(text: str, reminder: str) -> str:
+    """把提醒插在含「總金額」的那行之後；找不到則附在最後。"""
+    lines = text.split('\n')
+    for i, line in enumerate(lines):
+        if '總金額' in line:
+            lines.insert(i + 1, reminder.lstrip('\n'))
+            return '\n'.join(lines)
+    return text + reminder
+
 def inject_reminder(text: str) -> str:
     """Strip Claude's 小提醒, inject Python-calculated correct version."""
     clean = _REMINDER_STRIP_RE.sub('', text).rstrip()
@@ -939,10 +948,10 @@ def inject_reminder(text: str) -> str:
         needed = 50 - remainder
         target = ((total_units // 50) + 1) * 50
         reminder = (
-            f"\n💡 小提醒：再加 {needed} 單位湊滿 {target} 單位（整箱），"
+            f"💡 小提醒：再加 {needed} 單位湊滿 {target} 單位（整箱），"
             f"可省運費 290 元，請問是否調整呢？"
         )
-        return clean + reminder
+        return _insert_after_total_line(clean, reminder)
 
     # remainder 1–9：從品項直接計算，不依賴 Claude 的格式化金額
     shipping = 225
@@ -958,11 +967,11 @@ def inject_reminder(text: str) -> str:
     if adjusted_total <= 0:
         return clean
     reminder = (
-        f"\n💡 小提醒：若將{main_name}減少 {remainder} {main_unit}"
+        f"💡 小提醒：若將{main_name}減少 {remainder} {main_unit}"
         f"（調整為 {new_qty} {main_unit}），"
         f"可省運費 {shipping} 元，總計 {adjusted_total:,} 元，請問是否調整訂單呢？"
     )
-    return clean + reminder
+    return _insert_after_total_line(clean, reminder)
 
 
 def _track_faq(label: str):
