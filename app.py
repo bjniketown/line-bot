@@ -1020,6 +1020,9 @@ def quick_rule_reply(text, uid=None):
     # 完全比對（不分大小寫）
     exact = EXACT_REPLIES.get(t) or EXACT_REPLIES.get(t.lower())
     if exact:
+        # 有對話脈絡時，2字以內的模糊確認詞（好、ok…）讓 Claude 依脈絡回覆
+        if uid and len(t) <= 2 and get_history(uid):
+            return None
         return exact
     # 今天/現在 營業時間查詢 → 程式碼直接回答，零 token
     if any(kw in t for kw in ("今天有開", "現在有開", "今天營業", "現在營業",
