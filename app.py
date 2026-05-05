@@ -292,18 +292,23 @@ def set_shipping_full(date_str: str):
 def clear_shipping_full(date_str: str):
     _redis(["SREM", "shipping_full", date_str])
 
+_AUTOLOCK_HOURS = 36  # 距出貨日不足 N 小時自動視為滿檔
+
 def shipping_schedule_text() -> str:
     """回傳宅配排程注入文字，永遠注入，讓 Claude 自動安排出貨日。"""
     full = get_shipping_full_dates()
     now  = datetime.now(_TZ_TW)
     full_labels, avail_labels = [], []
-    for i in range(1, 22):
+    for i in range(0, 22):  # 從今天起算，自動鎖定邏輯會處理今天
         d = now + timedelta(days=i)
         if d.weekday() not in {0, 2, 4}:
             continue
-        key   = d.strftime("%Y-%m-%d")
-        label = f"{d.month}/{d.day:02d}（{_WEEKDAYS[d.weekday()]}）"
-        (full_labels if key in full else avail_labels).append(label)
+        key        = d.strftime("%Y-%m-%d")
+        label      = f"{d.month}/{d.day:02d}（{_WEEKDAYS[d.weekday()]}）"
+        d_midnight = d.replace(hour=0, minute=0, second=0, microsecond=0)
+        hours_left = (d_midnight - now).total_seconds() / 3600
+        is_auto_full = hours_left < _AUTOLOCK_HOURS  # 含今天（負數）
+        (full_labels if key in full or is_auto_full else avail_labels).append(label)
     avail_str = "、".join(avail_labels[:6]) if avail_labels else "暫無"
     lines = [f"【宅配排程】近期可出貨日：{avail_str}。"]
     if full_labels:
@@ -1007,6 +1012,13 @@ def _is_open_now() -> tuple[bool, str]:
     return False, "今日門市已打烊，明日請依正常營業時間前來 😊"
 
 
+_FUTURE_DATE_KW = (
+    "明天", "後天", "明日", "後日", "下週", "下星期", "下禮拜",
+    "星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日",
+    "週一", "週二", "週三", "週四", "週五", "週六", "週日",
+    "禮拜一", "禮拜二", "禮拜三", "禮拜四", "禮拜五", "禮拜六", "禮拜日",
+)
+
 def quick_rule_reply(text, uid=None):
     """打招呼/感謝/關鍵字 → 直接回傳，完全不呼叫 Claude。"""
     t = text.strip()
@@ -1014,9 +1026,10 @@ def quick_rule_reply(text, uid=None):
     if is_holiday_mode():
         if any(kw in t for kw in ("自取", "店取", "門市取", "取貨", "來店", "宅配", "訂購", "下單")):
             return "非常抱歉，目前連假期間暫停接單 🙏\n假期結束後恢復，歡迎屆時再訂購 😊"
-    # 門市停單（非連假）：只攔截取貨相關，宅配照常
+    # 門市停單（非連假）：只攔截今日取貨；含未來日期的讓 Claude 判斷（預約未來自取照常接單）
     elif store_status_text() and any(kw in t for kw in ("自取", "店取", "門市取", "取貨", "來店")):
-        return "非常抱歉，今日門市暫停接單 🙏\n宅配照常服務，如需宅配請告知，我為您安排 😊"
+        if not any(kw in t for kw in _FUTURE_DATE_KW):
+            return "非常抱歉，今日門市暫停接單 🙏\n宅配照常服務，如需宅配請告知，我為您安排 😊"
     # 完全比對（不分大小寫）
     exact = EXACT_REPLIES.get(t) or EXACT_REPLIES.get(t.lower())
     if exact:
@@ -1398,38 +1411,63 @@ def ping():
 
 
 _STORE_CSS = """<style>
+@import url('https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@400;700;900&display=swap');
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f0f2f5;min-height:100vh}
-.wrap{max-width:480px;margin:0 auto;padding:16px 14px 32px}
-h1{font-size:18px;font-weight:700;color:#111;margin-bottom:14px}
-.card{background:#fff;border-radius:14px;padding:16px;margin-bottom:12px;box-shadow:0 1px 4px rgba(0,0,0,.07)}
-.card-label{font-size:11px;font-weight:700;color:#9ca3af;text-transform:uppercase;letter-spacing:.8px;margin-bottom:10px}
-.status-bar{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
-.badge{padding:4px 12px;border-radius:99px;font-size:13px;font-weight:600}
-.bg-g{background:#dcfce7;color:#15803d}.bg-o{background:#ffedd5;color:#c2410c}.bg-r{background:#fee2e2;color:#b91c1c}
-.btn-row{display:flex;gap:8px;flex-wrap:wrap}
-.btn{padding:8px 14px;border-radius:9px;font-size:13px;font-weight:500;border:none;cursor:pointer;text-decoration:none;display:inline-block;line-height:1.4}
-.btn-r{background:#fee2e2;color:#b91c1c}.btn-g{background:#dcfce7;color:#15803d}.btn-o{background:#ffedd5;color:#c2410c}
-.sep{border:none;border-top:1px solid #f3f4f6;margin:12px 0}
-.hrow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:4px}
-.hrow label{font-size:13px;color:#6b7280}
-.hrow input{width:52px;padding:6px 8px;border:1.5px solid #d1d5db;border-radius:7px;font-size:13px;text-align:center}
+:root{--red:#8b1a1a;--red-lt:#f5e6e6;--red-md:#c0392b;--cream:#f7f0e6;--tan:#e8d9c4;--ink:#1a1208;--brown:#5c3d1e;--gold:#c8922a;--white:#fffdf8}
+body{font-family:'Noto Serif TC','Heiti TC','PingFang TC',serif;background:var(--cream);min-height:100vh}
+.header{background:var(--red);padding:18px 20px 16px;position:relative;overflow:hidden}
+.header::before{content:'';position:absolute;top:0;right:0;bottom:0;left:0;background:radial-gradient(ellipse at 80% 50%,rgba(0,0,0,.25) 0%,transparent 70%)}
+.hi-in{max-width:480px;margin:0 auto;position:relative;z-index:1;display:flex;align-items:center;justify-content:space-between}
+.lw{display:flex;align-items:center;gap:12px}
+.lm{width:44px;height:44px;background:var(--white);border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:900;color:var(--red);letter-spacing:-1px;line-height:1.2;text-align:center;flex-shrink:0;border:2px solid rgba(255,255,255,.3)}
+.lt{color:var(--white)}
+.lt-t{font-size:17px;font-weight:700;letter-spacing:2px;line-height:1.2}
+.lt-s{font-size:11px;opacity:.7;letter-spacing:1px;margin-top:2px}
+.hd{font-size:12px;color:rgba(255,255,255,.65);text-align:right;line-height:1.6}
+.ink-strip{height:6px;background:linear-gradient(90deg,var(--red) 0%,#5c0e0e 40%,var(--red-md) 70%,var(--gold) 100%)}
+.wrap{max-width:480px;margin:0 auto;padding:16px 14px 40px}
+.sec-t{font-size:12px;font-weight:700;color:var(--brown);letter-spacing:2px;display:flex;align-items:center;gap:8px;margin:18px 0 8px}
+.sec-t::after{content:'';flex:1;height:1px;background:linear-gradient(90deg,var(--tan),transparent)}
+.card{background:var(--white);border-radius:12px;border:1px solid var(--tan);overflow:hidden;margin-bottom:10px;box-shadow:0 2px 8px rgba(90,30,10,.07)}
+.card-hd{padding:12px 16px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--tan);background:var(--cream)}
+.card-nm{font-size:15px;font-weight:700;color:var(--ink);letter-spacing:1px}
+.card-bd{padding:14px 16px}
+.badge{padding:4px 12px;border-radius:99px;font-size:12px;font-weight:700;letter-spacing:.5px}
+.bg-g{background:#f0f9f0;color:#1a6b1a;border:1px solid #b3ddb3}
+.bg-o{background:#fdf6e8;color:#8b5e00;border:1px solid #e8d0a0}
+.bg-r{background:#fdf0f0;color:var(--red);border:1px solid #e8b3b3}
+.btn-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.btn{padding:9px 16px;border-radius:8px;font-size:13px;font-weight:700;font-family:inherit;border:none;cursor:pointer;letter-spacing:.5px;text-decoration:none;display:inline-block;line-height:1.4}
+.btn-r{background:var(--red);color:var(--white)}
+.btn-g{background:#1a6b1a;color:var(--white)}
+.btn-o{background:transparent;color:var(--red);border:1.5px solid var(--red)}
+.sep{border:none;border-top:1px solid var(--tan);margin:12px 0}
+.hrow{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.hrow label{font-size:13px;color:var(--brown)}
+.hrow input{width:52px;padding:7px 8px;border:1.5px solid var(--tan);border-radius:7px;font-size:13px;text-align:center;font-family:inherit;background:var(--cream);color:var(--ink)}
 .mnav{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
-.mnav-t{font-size:15px;font-weight:700;color:#111}
-.mnav-b{background:#f3f4f6;border:none;border-radius:7px;padding:5px 13px;font-size:16px;cursor:pointer;color:#374151}
+.mnav-t{font-size:15px;font-weight:700;color:var(--ink);letter-spacing:1px}
+.mnav-b{background:var(--cream);border:1.5px solid var(--tan);border-radius:7px;padding:5px 13px;font-size:16px;cursor:pointer;color:var(--brown);font-family:inherit}
 .slist{display:flex;flex-direction:column;gap:6px}
-.srow{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-radius:9px;border:1.5px solid #e5e7eb}
-.av{border-color:#86efac;background:#f0fdf4}.fl{border-color:#fca5a5;background:#fff5f5}.ps{border-color:#e5e7eb;background:#fafafa;opacity:.5}
-.hi{outline:2.5px solid #3b82f6;outline-offset:1px}
+.srow{display:flex;align-items:center;justify-content:space-between;padding:10px 13px;border-radius:9px;border:1.5px solid var(--tan);background:var(--white)}
+.av{border-color:#a3c9a3;background:#f5fbf5}
+.fl{border-color:#d9a3a3;background:#fdf5f5}
+.ps{border-color:var(--tan);background:var(--cream);opacity:.5}
+.hi{outline:2px solid var(--red);outline-offset:1px}
 .sd{display:flex;align-items:baseline;gap:5px}
-.sd-m{font-size:15px;font-weight:700;color:#111}.sd-w{font-size:13px;color:#6b7280}
-.td-p{font-size:10px;background:#3b82f6;color:#fff;padding:1px 7px;border-radius:99px;font-weight:600}
+.sd-m{font-size:15px;font-weight:700;color:var(--ink)}
+.sd-w{font-size:12px;color:var(--brown)}
+.td-p{font-size:10px;background:var(--red);color:var(--white);padding:1px 7px;border-radius:99px;font-weight:700;margin-left:3px}
 .sr{display:flex;align-items:center;gap:8px}
-.ss{font-size:13px;font-weight:600}.av .ss{color:#15803d}.fl .ss{color:#b91c1c}.ps .ss{color:#9ca3af}
-.sb{font-size:12px;padding:4px 10px;border-radius:6px;border:none;cursor:pointer;font-weight:500}
-.av .sb{background:#fee2e2;color:#b91c1c}.fl .sb{background:#dcfce7;color:#15803d}
-.pv{background:#f8fafc;border-left:3px solid #94a3b8;border-radius:0 8px 8px 0;padding:10px 14px;margin-top:12px;font-size:13px;color:#475569;line-height:1.6}
-.pv-l{font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px}
+.ss{font-size:12px;font-weight:700}
+.av .ss{color:#1a6b1a}.fl .ss{color:var(--red-md)}.ps .ss{color:#999}
+.sb{font-size:12px;padding:4px 10px;border-radius:6px;border:none;cursor:pointer;font-weight:600;font-family:inherit}
+.av .sb{background:var(--red-lt);color:var(--red-md)}
+.fl .sb{background:#f0f9f0;color:#1a6b1a}
+.pv{margin-top:14px;background:var(--cream);border-left:3px solid var(--gold);border-radius:0 8px 8px 0;padding:10px 14px}
+.pv-l{font-size:10px;font-weight:700;color:var(--brown);letter-spacing:1.5px;text-transform:uppercase;margin-bottom:6px}
+#pv{font-size:13px;color:var(--ink);line-height:1.7}
+.footer{text-align:center;margin-top:24px;font-size:11px;color:var(--brown);opacity:.5;letter-spacing:2px}
 </style>"""
 
 _STORE_JS = """
@@ -1527,24 +1565,46 @@ def store_admin():
     c_cls  = "bg-o" if chili_msg  else "bg-g"
     c_txt  = "🟠 目前售完"   if chili_msg else "🟢 供應正常"
 
+    now_tw  = datetime.now(_TZ_TW)
+    weekday_names = ["一","二","三","四","五","六","日"]
+    date_str = f"{now_tw.year}年{now_tw.month}月{now_tw.day}日"
+    time_str = f"星期{weekday_names[now_tw.weekday()]} {now_tw.strftime('%H:%M')}"
+
     return (
         "<!DOCTYPE html><html lang='zh-Hant'><head>"
         "<meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
-        "<title>老鄰居門市管理</title>" + _STORE_CSS +
-        "</head><body><div class='wrap'>"
-        "<h1>🏪 老鄰居門市管理</h1>"
+        "<title>老鄰居 · 門市管理</title>" + _STORE_CSS +
+        "</head><body>"
+
+        # ── 頂部標題 ──────────────────────────────────────────────────
+        "<div class='header'><div class='hi-in'>"
+        "<div class='lw'>"
+        "<div class='lm'>老<br>鄰<br>居</div>"
+        "<div class='lt'>"
+        "<div class='lt-t'>老鄰居豆干絲</div>"
+        "<div class='lt-s'>門市管理後台</div>"
+        "</div></div>"
+        f"<div class='hd'>{date_str}<br>{time_str}</div>"
+        "</div></div>"
+        "<div class='ink-strip'></div>"
+
+        "<div class='wrap'>"
 
         # ── 門市接單 ──────────────────────────────────────────────────
+        "<div class='sec-t'>門市接單</div>"
         "<div class='card'>"
-        "<div class='card-label'>門市接單</div>"
-        "<div class='status-bar'><span style='font-size:14px;color:#374151'>目前狀態</span>"
-        f"<span class='badge {s_cls}'>{s_txt}</span></div>"
+        "<div class='card-hd'>"
+        "<span class='card-nm'>目前狀態</span>"
+        f"<span class='badge {s_cls}'>{s_txt}</span>"
+        "</div>"
+        "<div class='card-bd'>"
         "<div class='btn-row'>"
         f"<a class='btn btn-r' href='/store?token={token}&action=close&reason=今日提前售完'>今日提前售完</a>"
         f"<a class='btn btn-r' href='/store?token={token}&action=close&reason=今日臨時公休'>今日臨時公休</a>"
         f"<a class='btn btn-g' href='/store?token={token}&action=open'>恢復接單</a>"
-        "</div><hr class='sep'>"
-        "<div style='font-size:13px;color:#6b7280;margin-bottom:6px'>連假停單</div>"
+        "</div>"
+        "<hr class='sep'>"
+        "<div style='font-size:12px;color:var(--brown);margin-bottom:8px;letter-spacing:.5px'>連假停單</div>"
         f"<form class='hrow' action='/store' method='get'>"
         f"<input type='hidden' name='token' value='{token}'>"
         "<input type='hidden' name='action' value='close'>"
@@ -1552,32 +1612,35 @@ def store_admin():
         "<label>停單</label>"
         "<input type='number' name='days' value='3' min='1' max='30'>"
         "<label>天</label>"
-        "<button class='btn btn-r' type='submit'>確認停單</button>"
-        "</form></div>"
-
-        # ── 水餃 ──────────────────────────────────────────────────────
-        "<div class='card'>"
-        "<div class='card-label'>水餃</div>"
-        "<div class='status-bar'><span style='font-size:14px;color:#374151'>目前狀態</span>"
-        f"<span class='badge {d_cls}'>{d_txt}</span></div>"
-        "<div class='btn-row'>"
-        f"<a class='btn btn-o' href='/store?token={token}&action=dumpling_close'>🟠 水餃售完</a>"
-        f"<a class='btn btn-g' href='/store?token={token}&action=dumpling_open'>🟢 恢復供應</a>"
+        "<button class='btn btn-o' type='submit'>確認停單</button>"
+        "</form>"
         "</div></div>"
 
-        # ── 油潑辣子 ──────────────────────────────────────────────────
+        # ── 品項供應 ──────────────────────────────────────────────────
+        "<div class='sec-t'>品項供應</div>"
         "<div class='card'>"
-        "<div class='card-label'>油潑辣子</div>"
-        "<div class='status-bar'><span style='font-size:14px;color:#374151'>目前狀態</span>"
-        f"<span class='badge {c_cls}'>{c_txt}</span></div>"
-        "<div class='btn-row'>"
-        f"<a class='btn btn-o' href='/store?token={token}&action=chili_close'>🟠 辣油售完</a>"
-        f"<a class='btn btn-g' href='/store?token={token}&action=chili_open'>🟢 恢復供應</a>"
-        "</div></div>"
+        "<div class='card-hd'>"
+        "<span class='card-nm'>黑豬水餃</span>"
+        f"<span class='badge {d_cls}'>{d_txt}</span>"
+        "</div>"
+        "<div class='card-bd'><div class='btn-row'>"
+        f"<a class='btn btn-r' href='/store?token={token}&action=dumpling_close'>今日售完</a>"
+        f"<a class='btn btn-g' href='/store?token={token}&action=dumpling_open'>恢復供應</a>"
+        "</div></div></div>"
+
+        "<div class='card'>"
+        "<div class='card-hd'>"
+        "<span class='card-nm'>油潑辣子</span>"
+        f"<span class='badge {c_cls}'>{c_txt}</span>"
+        "</div>"
+        "<div class='card-bd'><div class='btn-row'>"
+        f"<a class='btn btn-r' href='/store?token={token}&action=chili_close'>標記售完</a>"
+        f"<a class='btn btn-g' href='/store?token={token}&action=chili_open'>恢復供應</a>"
+        "</div></div></div>"
 
         # ── 宅配排程 ──────────────────────────────────────────────────
-        "<div class='card'>"
-        "<div class='card-label'>📦 宅配排程</div>"
+        "<div class='sec-t'>宅配排程</div>"
+        "<div class='card'><div class='card-bd'>"
         "<div class='mnav'>"
         "<button class='mnav-b' onclick='changeMonth(-1)'>‹</button>"
         "<span class='mnav-t' id='mt'></span>"
@@ -1585,8 +1648,9 @@ def store_admin():
         "</div>"
         "<div class='slist' id='sl'></div>"
         "<div class='pv'><div class='pv-l'>機器人回覆預覽</div><span id='pv'></span></div>"
-        "</div>"
+        "</div></div>"
 
+        "<div class='footer'>老鄰居豆干絲 · 東勢美食街</div>"
         "</div>"
         f"<script>const T='{token}',FD=new Set({fd_json});" + _STORE_JS +
         "</script></body></html>"
