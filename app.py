@@ -392,42 +392,6 @@ SYSTEM_TEXT = """你是「老鄰居豆干絲」的 LINE 客服助理，請用繁
 - 100 包 → 2 整箱，餘數 0 → 免運費，總計 100×70 = 7,000 元
 - 110 包 → 2 整箱 + 餘數 10 → 運費 225 元，總計 110×70+225 = 7,925 元
 
-划算提醒（必須執行，不可省略）：
-
-【強制驗算步驟，每次顯示金額前必須執行】
-  步驟 1：加總所有品項單位數 → 總單位
-  步驟 2：總單位 ÷ 50 → 商數（整箱數）＋ 餘數
-  步驟 3：依餘數判斷是否觸發提醒：
-    餘數 1–9   → 觸發減量提醒
-    餘數 39–49 → 觸發湊滿提醒
-    其他餘數   → 不提醒，直接列總金額，不得出現任何小提醒文字
-
-▶ 湊滿提醒（餘數 39–49）：
-  格式：「💡 小提醒：再加 N 單位湊滿 M 單位（整箱），可省運費 Y 元，請問是否調整呢？」
-  範例：39–49 單位 → 湊滿 50；89–99 → 湊滿 100；139–149 → 湊滿 150（以此類推）
-
-▶ 減量提醒（餘數 1–9，且回覆中顯示運費金額）：
-  格式：「💡 小提醒：若將【主品項】減少 N 單位（調整為 M 單位），可省運費 Y 元，總計 Z 元，請問是否調整訂單呢？」
-  計算步驟（必須照做）：
-    1. 找數量最多的品項為「主品項」，其單價記為 P
-    2. 減少數量 N = 餘數
-    3. 調整後總單位 = 原總單位 - N（必為 50 的整數倍，即整箱）
-    4. 省下運費 Y = 原運費（225 或 290）
-    5. 調整後總金額 Z = 原總金額 - N×P - 原運費
-  規則：
-  - 混搭時一律從數量最多的品項扣，不得整個移除某品項
-  - ❌ 禁止（51 單位：豆干絲 50 包 + 辣油 1 罐）→ 不得說「若移除辣油 1 罐」
-  - ✅ 正確（51 單位：豆干絲 50 包 + 辣油 1 罐）→ 豆干絲最多，扣 1 包：
-    「若將豆干絲減少 1 包（調整為 49 包），可省運費 225 元，總計 3,550 元，請問是否調整？」
-    驗算：49×70＋120＝3,430＋120＝3,550 元（免運）✓
-  - 單一品項範例（59 包豆干絲，餘數 9）：
-    「若將豆干絲減少 9 包（調整為 50 包），可省運費 225 元，總計 3,500 元，請問是否調整？」
-    驗算：50×70＝3,500 元（免運）✓
-
-❌ 真實錯誤案例（嚴禁仿效）：
-  訂單：豆干絲 20 包＋花生 2 份＋昆布 2 份 = 24 單位
-  驗算：24 ÷ 50 = 0 整箱 餘 24 → 餘數 24 不在任何觸發範圍 → 不得出現任何小提醒
-  以下是錯誤示範：「若將豆干絲減少 24 包（調整為 26 包）可湊滿 50 單位...」→ 完全錯誤，嚴禁出現
 
 【金額回覆格式，強制執行】
 確認訂單金額時，嚴格禁止以下兩種格式：
@@ -934,6 +898,75 @@ def extract_order(text):
 
 
 
+# ── Python-side 划算提醒（精確計算，取代 Claude 自行判斷）────────────────
+_TOTAL_UNITS_RE   = re.compile(r'共\s*(\d+)\s*單位')
+_TOTAL_AMOUNT_RE  = re.compile(r'總金額[：:]\s*\*{0,2}\s*([\d,]+)\s*元')
+_REMINDER_STRIP_RE = re.compile(r'\n?\*{0,2}💡\s*小提醒[：:][^\n]*\*{0,2}')
+
+_ITEM_PARSE_PATTERNS = [
+    (re.compile(r'(?:招牌)?豆干絲\s*(\d+)\s*包'), '招牌豆干絲', 70,  '包'),
+    (re.compile(r'(?:香滷)?花生\s*(\d+)\s*份'),   '香滷花生',   100, '份'),
+    (re.compile(r'(?:天然)?昆布\s*(\d+)\s*份'),   '天然昆布',   100, '份'),
+    (re.compile(r'(?:油潑)?辣[子油]\s*(\d+)\s*罐'), '油潑辣子', 120, '罐'),
+    (re.compile(r'水餃\s*(\d+)\s*包'),            '水餃',       280, '包'),
+]
+
+def _parse_items_from_response(text: str) -> list:
+    items = []
+    for pattern, name, price, unit in _ITEM_PARSE_PATTERNS:
+        m = pattern.search(text)
+        if m:
+            qty = int(m.group(1))
+            if qty > 0:
+                items.append((name, qty, price, unit))
+    return items
+
+def inject_reminder(text: str) -> str:
+    """Strip Claude's 小提醒, inject Python-calculated correct version."""
+    clean = _REMINDER_STRIP_RE.sub('', text).rstrip()
+
+    m_units  = _TOTAL_UNITS_RE.search(text)
+    m_amount = _TOTAL_AMOUNT_RE.search(text)
+    if not m_units or not m_amount or '運費' not in text:
+        return clean
+
+    total_units = int(m_units.group(1))
+    remainder   = total_units % 50
+
+    if remainder == 0 or (10 <= remainder <= 38):
+        return clean
+
+    total_amount = int(m_amount.group(1).replace(',', ''))
+
+    if 39 <= remainder <= 49:
+        needed = 50 - remainder
+        target = ((total_units // 50) + 1) * 50
+        reminder = (
+            f"\n💡 小提醒：再加 {needed} 單位湊滿 {target} 單位（整箱），"
+            f"可省運費 290 元，請問是否調整呢？"
+        )
+        return clean + reminder
+
+    # remainder 1–9
+    shipping = 225
+    items = _parse_items_from_response(text)
+    if not items:
+        return clean
+    main_name, main_qty, main_price, main_unit = max(items, key=lambda x: x[1])
+    if main_qty <= remainder:
+        return clean
+    new_qty        = main_qty - remainder
+    adjusted_total = total_amount - remainder * main_price - shipping
+    if adjusted_total <= 0:
+        return clean
+    reminder = (
+        f"\n💡 小提醒：若將{main_name}減少 {remainder} {main_unit}"
+        f"（調整為 {new_qty} {main_unit}），"
+        f"可省運費 {shipping} 元，總計 {adjusted_total:,} 元，請問是否調整訂單呢？"
+    )
+    return clean + reminder
+
+
 def _track_faq(label: str):
     """將問題分類計數寫入 Redis Sorted Set（失敗靜默略過，不影響主流程）。"""
     _redis(["ZINCRBY", "faq_stats", "1", label])
@@ -1240,6 +1273,7 @@ def ask(uid, msg):
         return "很抱歉，系統暫時忙碌，請稍後再試或直撥 04-25882881", False
 
     clean, order_type, order_info = extract_order(raw)
+    clean = inject_reminder(clean)
     if order_info:
         set_has_order(uid)
         parts = order_info.split("|")
