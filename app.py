@@ -239,6 +239,10 @@ def clear_has_order(uid: str):
     """清除訂單旗標（配合清除記憶使用）。"""
     _redis(["DEL", f"has_order:{uid}"])
 
+def clear_customer_profile(uid: str):
+    """清除客人資料（姓名、電話、地址）。"""
+    _redis(["DEL", f"profile:{uid}"])
+
 def get_customer_profile(uid: str) -> dict:
     """取得客人資料（姓名、電話、地址）。"""
     if not UPSTASH_URL:
@@ -1392,7 +1396,8 @@ def webhook():
             if is_reset_request(text):
                 set_history(uid, [])
                 clear_has_order(uid)
-                reply(token, "好的！對話記憶已清除，我們重新開始 😊 請問有什麼可以幫您的嗎？")
+                clear_customer_profile(uid)
+                reply(token, "好的！對話記憶與客戶資料已清除，我們重新開始 😊 請問有什麼可以幫您的嗎？")
                 continue
 
             if is_share_request(text):
