@@ -899,16 +899,16 @@ def extract_order(text):
 
 
 # ── Python-side 划算提醒（精確計算，取代 Claude 自行判斷）────────────────
-_TOTAL_UNITS_RE   = re.compile(r'共\s*(\d+)\s*單位')
+_TOTAL_UNITS_RE   = re.compile(r'[共=]\s*(\d+)\s*單位')
 _TOTAL_AMOUNT_RE  = re.compile(r'總金額[：:]\s*\*{0,2}\s*([\d,]+)\s*元')
 _REMINDER_STRIP_RE = re.compile(r'\n?\*{0,2}💡\s*小提醒[：:][^\n]*\*{0,2}')
 
 _ITEM_PARSE_PATTERNS = [
-    (re.compile(r'(?:招牌)?豆干絲\s*(\d+)\s*包'), '招牌豆干絲', 70,  '包'),
-    (re.compile(r'(?:香滷)?花生\s*(\d+)\s*份'),   '香滷花生',   100, '份'),
-    (re.compile(r'(?:天然)?昆布\s*(\d+)\s*份'),   '天然昆布',   100, '份'),
-    (re.compile(r'(?:油潑)?辣[子油]\s*(\d+)\s*罐'), '油潑辣子', 120, '罐'),
-    (re.compile(r'水餃\s*(\d+)\s*包'),            '水餃',       280, '包'),
+    (re.compile(r'(?:招牌)?豆干絲.{0,20}?(\d+)\s*包'), '招牌豆干絲', 70,  '包'),
+    (re.compile(r'(?:香滷)?花生.{0,15}?(\d+)\s*份'),   '香滷花生',   100, '份'),
+    (re.compile(r'(?:天然)?昆布.{0,15}?(\d+)\s*份'),   '天然昆布',   100, '份'),
+    (re.compile(r'(?:油潑)?辣[子油].{0,15}?(\d+)\s*罐'), '油潑辣子', 120, '罐'),
+    (re.compile(r'水餃.{0,15}?(\d+)\s*包'),            '水餃',       280, '包'),
 ]
 
 def _parse_items_from_response(text: str) -> list:
