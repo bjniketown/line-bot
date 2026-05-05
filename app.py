@@ -899,9 +899,9 @@ def extract_order(text):
 
 
 # ── Python-side 划算提醒（精確計算，取代 Claude 自行判斷）────────────────
-_TOTAL_UNITS_RE   = re.compile(r'[共=]\s*(\d+)\s*單位')
-_TOTAL_AMOUNT_RE  = re.compile(r'總金額[：:]\s*\*{0,2}\s*([\d,]+)\s*元')
-_REMINDER_STRIP_RE = re.compile(r'\n?\*{0,2}💡\s*小提醒[：:][^\n]*\*{0,2}')
+_TOTAL_UNITS_RE_MAIN = re.compile(r'共\s*(\d+)\s*單位')    # 優先：標準格式
+_TOTAL_UNITS_RE_CALC = re.compile(r'=\s*(\d+)\s*單位')     # 備用：Claude 用算式格式
+_REMINDER_STRIP_RE   = re.compile(r'\n?\*{0,2}💡\s*小提醒[：:][^\n]*\*{0,2}')
 
 _ITEM_PARSE_PATTERNS = [
     (re.compile(r'(?:招牌)?豆干絲.{0,20}?(\d+)\s*包'), '招牌豆干絲', 70,  '包'),
@@ -934,7 +934,7 @@ def inject_reminder(text: str) -> str:
     """Strip Claude's 小提醒, inject Python-calculated correct version."""
     clean = _REMINDER_STRIP_RE.sub('', text).rstrip()
 
-    m_units = _TOTAL_UNITS_RE.search(text)
+    m_units = _TOTAL_UNITS_RE_MAIN.search(text) or _TOTAL_UNITS_RE_CALC.search(text)
     if not m_units or '運費' not in text:
         return clean
 
