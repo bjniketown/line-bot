@@ -925,9 +925,8 @@ def inject_reminder(text: str) -> str:
     """Strip Claude's 小提醒, inject Python-calculated correct version."""
     clean = _REMINDER_STRIP_RE.sub('', text).rstrip()
 
-    m_units  = _TOTAL_UNITS_RE.search(text)
-    m_amount = _TOTAL_AMOUNT_RE.search(text)
-    if not m_units or not m_amount or '運費' not in text:
+    m_units = _TOTAL_UNITS_RE.search(text)
+    if not m_units or '運費' not in text:
         return clean
 
     total_units = int(m_units.group(1))
@@ -935,8 +934,6 @@ def inject_reminder(text: str) -> str:
 
     if remainder == 0 or (10 <= remainder <= 38):
         return clean
-
-    total_amount = int(m_amount.group(1).replace(',', ''))
 
     if 39 <= remainder <= 49:
         needed = 50 - remainder
@@ -947,7 +944,7 @@ def inject_reminder(text: str) -> str:
         )
         return clean + reminder
 
-    # remainder 1–9
+    # remainder 1–9：從品項直接計算，不依賴 Claude 的格式化金額
     shipping = 225
     items = _parse_items_from_response(text)
     if not items:
@@ -955,8 +952,9 @@ def inject_reminder(text: str) -> str:
     main_name, main_qty, main_price, main_unit = max(items, key=lambda x: x[1])
     if main_qty <= remainder:
         return clean
+    items_cost     = sum(qty * price for _, qty, price, _ in items)
     new_qty        = main_qty - remainder
-    adjusted_total = total_amount - remainder * main_price - shipping
+    adjusted_total = items_cost - remainder * main_price  # 減量後整箱免運
     if adjusted_total <= 0:
         return clean
     reminder = (
