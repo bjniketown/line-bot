@@ -1095,6 +1095,9 @@ def quick_rule_reply(text, uid=None):
         return None
     if re.search(r'修改|更改|變更|改成|改為', t) and any(kw in t for kw in ("運費", "金額", "總計", "價格", "費用")):
         return None
+    # 含數字的運費計算問題 → 讓 Claude 直接計算，不回通用規則
+    if "運費" in t and re.search(r'\d+', t):
+        return None
     if ("末四碼" in t
             or re.search(r'已匯[款]?|匯好[了]?|付好[了]?|轉好[了]?|已付款?|付款完成', t)
             or re.fullmatch(r'\d{4}', t)):
