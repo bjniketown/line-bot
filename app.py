@@ -1050,6 +1050,41 @@ def _strip_time_warnings(text: str) -> str:
     cleaned = [p for p in paragraphs if not any(kw in p for kw in _TIME_WARNING_KEYWORDS)]
     return '\n\n'.join(cleaned).strip()
 
+# 從 Claude 回覆中自動偵測時間警告，若時間實際合法則移除（不需要等 <<PICKUP>> 標籤）
+_RESPONSE_DT_RE = re.compile(
+    r'(\d{1,2})[/月](\d{1,2})[日號]?\s*(?:[（(][^）)]{0,15}[）)])?\s*'
+    r'(上午|早上|下午|中午)?\s*(\d{1,2})[點時:：](\d{0,2})'
+)
+
+def _auto_strip_invalid_time_warnings(text: str) -> str:
+    """掃描所有回覆：若含打烊警告但時間實際合法，直接移除警告段落。"""
+    if not any(kw in text for kw in _TIME_WARNING_KEYWORDS):
+        return text
+    m = _RESPONSE_DT_RE.search(text)
+    if not m:
+        return text
+    try:
+        month, day   = int(m.group(1)), int(m.group(2))
+        ampm         = m.group(3) or ''
+        hour         = int(m.group(4))
+        minute       = int(m.group(5)) if m.group(5) else 0
+        if ampm == '下午' and hour < 12:
+            hour += 12
+        elif ampm in ('上午', '早上') and hour == 12:
+            hour = 0
+        year = datetime.now(_TZ_TW).year
+        dt   = datetime(year, month, day, hour, minute, tzinfo=_TZ_TW)
+        wd   = dt.weekday()
+        slots = _OPEN_HOURS.get(wd)
+        t = hour * 60 + minute
+        if slots:
+            for sh, sm, eh, em in slots:
+                if (sh * 60 + sm) <= t < (eh * 60 + em):
+                    return _strip_time_warnings(text)  # 合法 → 移除警告
+    except Exception:
+        pass
+    return text  # 解析失敗或確實不合法 → 保留原文
+
 _ITEM_PARSE_PATTERNS = [
     (re.compile(r'(?:招牌)?豆干絲.{0,20}?(\d+)\s*包'), '招牌豆干絲', 70,  '包'),
     (re.compile(r'(?:香滷)?花生.{0,15}?(\d+)\s*份'),   '香滷花生',   100, '份'),
@@ -1447,6 +1482,7 @@ def ask(uid, msg):
     clean, order_type, order_info = extract_order(raw)
     clean = inject_reminder(clean)
     clean = inject_correct_total(clean)
+    clean = _auto_strip_invalid_time_warnings(clean)  # 全域掃描：合法時間的警告直接移除
 
     # Python-side 取貨時間驗證：Claude 不可靠，由 Python 最終裁定
     if order_type == "pickup" and order_info:
