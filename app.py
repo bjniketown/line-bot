@@ -1056,34 +1056,69 @@ _RESPONSE_DT_RE = re.compile(
     r'(上午|早上|下午|中午)?\s*(\d{1,2})[點時:：](\d{0,2})'
 )
 
-def _auto_strip_invalid_time_warnings(text: str) -> str:
-    """掃描所有回覆：若含打烊警告但時間實際合法，直接移除警告段落。"""
+def _parse_time_from_text(src: str):
+    """從文字中提取時間，回傳 (year, month, day, hour, minute) 或 None。
+    支援「5/8下午5點30」「下午5點半」「早上10:00」等格式。"""
+    # 含日期格式
+    m = _RESPONSE_DT_RE.search(src)
+    if m:
+        try:
+            month  = int(m.group(1)); day    = int(m.group(2))
+            ampm   = m.group(3) or '';  hour   = int(m.group(4))
+            minute = int(m.group(5)) if m.group(5) else 0
+            if ampm == '下午' and hour < 12: hour += 12
+            elif ampm in ('上午', '早上') and hour == 12: hour = 0
+            year = datetime.now(_TZ_TW).year
+            return (year, month, day, hour, minute)
+        except Exception:
+            pass
+    # 僅時間（無日期）：下午5點30 / 早上10點 / 下午5點半
+    m2 = re.search(r'(上午|早上|下午|中午)\s*(\d{1,2})[點時:：](\d{0,2})(半)?', src)
+    if m2:
+        try:
+            ampm   = m2.group(1); hour = int(m2.group(2))
+            minute = int(m2.group(3)) if m2.group(3) else 0
+            if m2.group(4): minute = 30   # 「半」= 30 分
+            if ampm == '下午' and hour < 12: hour += 12
+            elif ampm in ('上午', '早上') and hour == 12: hour = 0
+            return (None, None, None, hour, minute)  # 無日期，day=None
+        except Exception:
+            pass
+    return None
+
+def _auto_strip_invalid_time_warnings(text: str, user_msg: str = "") -> str:
+    """掃描所有回覆：若含打烊警告但時間實際合法，直接移除警告段落。
+    同時搜尋 Claude 回覆與客人原始訊息，以應對 Claude 未在回覆中複述時間的情況。"""
     if not any(kw in text for kw in _TIME_WARNING_KEYWORDS):
         return text
-    m = _RESPONSE_DT_RE.search(text)
-    if not m:
-        return text
-    try:
-        month, day   = int(m.group(1)), int(m.group(2))
-        ampm         = m.group(3) or ''
-        hour         = int(m.group(4))
-        minute       = int(m.group(5)) if m.group(5) else 0
-        if ampm == '下午' and hour < 12:
-            hour += 12
-        elif ampm in ('上午', '早上') and hour == 12:
-            hour = 0
-        year = datetime.now(_TZ_TW).year
-        dt   = datetime(year, month, day, hour, minute, tzinfo=_TZ_TW)
-        wd   = dt.weekday()
-        slots = _OPEN_HOURS.get(wd)
+
+    for src in [text, user_msg]:
+        parsed = _parse_time_from_text(src)
+        if not parsed:
+            continue
+        year, month, day, hour, minute = parsed
         t = hour * 60 + minute
-        if slots:
-            for sh, sm, eh, em in slots:
-                if (sh * 60 + sm) <= t < (eh * 60 + em):
-                    return _strip_time_warnings(text)  # 合法 → 移除警告
-    except Exception:
-        pass
-    return text  # 解析失敗或確實不合法 → 保留原文
+        try:
+            if month and day:
+                dt  = datetime(year, month, day, hour, minute, tzinfo=_TZ_TW)
+                wd  = dt.weekday()
+                slots = _OPEN_HOURS.get(wd)
+                if slots:
+                    for sh, sm, eh, em in slots:
+                        if (sh * 60 + sm) <= t < (eh * 60 + em):
+                            return _strip_time_warnings(text)
+                return text  # 有日期但不合法 → 保留警告
+            else:
+                # 無日期：只要時間落在任一非公休日的營業時段即視為合法
+                for wd, slots in _OPEN_HOURS.items():
+                    if slots:
+                        for sh, sm, eh, em in slots:
+                            if (sh * 60 + sm) <= t < (eh * 60 + em):
+                                return _strip_time_warnings(text)
+                return text  # 時間不在任何營業時段 → 保留警告
+        except Exception:
+            continue
+    return text
 
 _ITEM_PARSE_PATTERNS = [
     (re.compile(r'(?:招牌)?豆干絲.{0,20}?(\d+)\s*包'), '招牌豆干絲', 70,  '包'),
@@ -1482,7 +1517,7 @@ def ask(uid, msg):
     clean, order_type, order_info = extract_order(raw)
     clean = inject_reminder(clean)
     clean = inject_correct_total(clean)
-    clean = _auto_strip_invalid_time_warnings(clean)  # 全域掃描：合法時間的警告直接移除
+    clean = _auto_strip_invalid_time_warnings(clean, msg)  # 全域掃描：同時看客人原始訊息
 
     # Python-side 取貨時間驗證：Claude 不可靠，由 Python 最終裁定
     if order_type == "pickup" and order_info:
