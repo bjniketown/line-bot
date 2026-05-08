@@ -957,6 +957,27 @@ _TOTAL_UNITS_RE_MAIN = re.compile(r'共\s*(\d+)\s*單位')    # 優先：標準�
 _TOTAL_UNITS_RE_CALC = re.compile(r'=\s*(\d+)\s*單位')     # 備用：Claude 用算式格式
 _REMINDER_STRIP_RE   = re.compile(r'\n?\*{0,2}💡\s*小提醒[：:][^\n]*\*{0,2}')
 
+# ── Python-side 總金額校正（Claude 算術不可靠，由 Python 重算）────────────
+_ORDER_ITEM_RE   = re.compile(
+    r'[：:]\s*(\d+)\s*(?:包|罐|份)[^（(]*[（(]\s*(\d+)\s*元\s*[/／]\s*(?:包|罐|份)[）)]'
+)
+_TOTAL_REPLACE_RE = re.compile(r'(總金額[：:]\s*)[\d,，]+(\s*元)')
+
+def inject_correct_total(text: str) -> str:
+    """從 Claude 回覆的品項單價重算總金額，替換 Claude 自行計算的錯誤結果。"""
+    if '總金額' not in text:
+        return text
+    items = _ORDER_ITEM_RE.findall(text)
+    if not items:
+        return text
+    try:
+        calculated = sum(int(qty) * int(price) for qty, price in items)
+        if calculated <= 0:
+            return text
+        return _TOTAL_REPLACE_RE.sub(lambda m: f"{m.group(1)}{calculated:,}{m.group(2)}", text)
+    except Exception:
+        return text
+
 _ITEM_PARSE_PATTERNS = [
     (re.compile(r'(?:招牌)?豆干絲.{0,20}?(\d+)\s*包'), '招牌豆干絲', 70,  '包'),
     (re.compile(r'(?:香滷)?花生.{0,15}?(\d+)\s*份'),   '香滷花生',   100, '份'),
@@ -1353,6 +1374,7 @@ def ask(uid, msg):
 
     clean, order_type, order_info = extract_order(raw)
     clean = inject_reminder(clean)
+    clean = inject_correct_total(clean)
     if order_info:
         set_has_order(uid)
         parts = order_info.split("|")
