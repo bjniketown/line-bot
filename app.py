@@ -821,8 +821,9 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
 ▶ 門市自取訂單：當客戶提供以下三項資料（缺一不可），在回覆最後一行加上標記：
   付款方式：現場現金支付，不主動提及匯款選項
   必要資料：貴姓、聯絡電話、預計取貨時間
-  <<PICKUP:姓氏|電話|取貨時間|品項簡述>>
-  例：<<PICKUP:王|0912345678|明天上午10點|豆干絲5包一般包裝>>
+  <<PICKUP:姓氏|電話|YYYY-MM-DD HH:MM|品項簡述>>
+  例：<<PICKUP:王|0912345678|2026-05-09 10:00|豆干絲5包一般包裝>>
+  取貨時間必須轉換為標準格式 YYYY-MM-DD HH:MM，依系統提供的【日期星期對照表】換算，不可保留中文時間描述
 
 以上標記不得讓客戶看到，資訊不齊全時絕對不加。"""
 
@@ -999,6 +1000,54 @@ def inject_correct_total(text: str) -> str:
     if result:
         return result
     return text
+
+
+# ── Python-side 取貨時間驗證（Claude 的時間判斷不可靠，由 Python 確認）────
+_PICKUP_DT_RE = re.compile(r'(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})')
+_WEEKDAY_ZH   = ['週一', '週二', '週三', '週四', '週五', '週六', '週日']
+_TIME_WARNING_KEYWORDS = ('打烊', '關門', '快關', '時間緊', '來不及', '即將', '建議改約', '建議您改約', '請改約', '恐怕')
+
+def validate_pickup_time(order_info: str) -> tuple[bool, str]:
+    """驗證 <<PICKUP>> 中的 YYYY-MM-DD HH:MM 是否在營業時段。
+    回傳 (合法, 錯誤訊息)；無法解析時回傳 (True, '') 放行。"""
+    m = _PICKUP_DT_RE.search(order_info)
+    if not m:
+        return True, ""
+    try:
+        dt = datetime.strptime(f"{m.group(1)} {m.group(2)}", "%Y-%m-%d %H:%M").replace(tzinfo=_TZ_TW)
+    except ValueError:
+        return True, ""
+
+    wd    = dt.weekday()
+    slots = _OPEN_HOURS.get(wd)
+    t     = dt.hour * 60 + dt.minute
+
+    if slots is not None:
+        for sh, sm, eh, em in slots:
+            if (sh * 60 + sm) <= t < (eh * 60 + em):
+                return True, ""
+
+    day_str  = f"{m.group(1)}（{_WEEKDAY_ZH[wd]}）"
+    time_str = m.group(2)
+    if slots is None:
+        reason = f"{_WEEKDAY_ZH[wd]}為門市公休日"
+    else:
+        reason = "不在營業時段內（空檔或已過打烊時間）"
+
+    return False, (
+        f"很抱歉，{day_str} {time_str} {reason} 😊\n\n"
+        f"門市營業時間：\n"
+        f"・週一至六 08:00–13:30 / 16:00–18:00\n"
+        f"・週日 08:00–13:30\n"
+        f"・週四全日公休\n\n"
+        f"請問您方便改約其他時間嗎？"
+    )
+
+def _strip_time_warnings(text: str) -> str:
+    """取貨時間合法時，移除 Claude 錯誤加入的打烊警告段落。"""
+    paragraphs = text.split('\n\n')
+    cleaned = [p for p in paragraphs if not any(kw in p for kw in _TIME_WARNING_KEYWORDS)]
+    return '\n\n'.join(cleaned).strip()
 
 _ITEM_PARSE_PATTERNS = [
     (re.compile(r'(?:招牌)?豆干絲.{0,20}?(\d+)\s*包'), '招牌豆干絲', 70,  '包'),
@@ -1397,6 +1446,16 @@ def ask(uid, msg):
     clean, order_type, order_info = extract_order(raw)
     clean = inject_reminder(clean)
     clean = inject_correct_total(clean)
+
+    # Python-side 取貨時間驗證：Claude 不可靠，由 Python 最終裁定
+    if order_type == "pickup" and order_info:
+        is_valid, err_msg = validate_pickup_time(order_info)
+        if not is_valid:
+            clean      = err_msg   # 完全取代 Claude 的錯誤回覆
+            order_info = None      # 不成立訂單
+        else:
+            clean = _strip_time_warnings(clean)  # 移除 Claude 錯誤加的打烊警告
+
     if order_info:
         set_has_order(uid)
         parts = order_info.split("|")
