@@ -963,22 +963,55 @@ _REMINDER_STRIP_RE   = re.compile(r'\n?\*{0,2}💡\s*小提醒[：:][^\n]*\*{0,2
 _ORDER_ITEM_RE   = re.compile(
     r'[：:]\s*(\d+)\s*(?:包|罐|份)[^（(]*[（(]\s*(\d+)\s*元\s*[/／]\s*(?:包|罐|份)[）)]'
 )
-_TOTAL_REPLACE_RE = re.compile(r'(總金額[：:]\s*)[\d,，]+(\s*元)')
+_TOTAL_REPLACE_RE = re.compile(r'((?:總金額|總計)[：:]\s*)[\d,，]+(\s*元)')
+
+# 備用：無單價時用固定售價推算（依品項名稱比對，順序很重要：細的放前面）
+_ITEM_PRICE_LOOKUP = [
+    (re.compile(r'豆干絲一般.{0,6}?(\d+)\s*包'),   60),
+    (re.compile(r'一般包裝.{0,6}?(\d+)\s*包'),      60),
+    (re.compile(r'豆干絲真空.{0,6}?(\d+)\s*包'),   70),
+    (re.compile(r'真空包裝.{0,6}?(\d+)\s*包'),      70),
+    (re.compile(r'(?:招牌)?豆干絲.{0,6}?(\d+)\s*包'), 70),
+    (re.compile(r'(?:香滷)?花生.{0,6}?(\d+)\s*份'),  100),
+    (re.compile(r'(?:天然)?昆布.{0,6}?(\d+)\s*份'),  100),
+    (re.compile(r'(?:油潑)?辣[子油].{0,6}?(\d+)\s*罐'), 120),
+    (re.compile(r'水餃.{0,6}?(\d+)\s*包'),           280),
+]
 
 def inject_correct_total(text: str) -> str:
-    """從 Claude 回覆的品項單價重算總金額，替換 Claude 自行計算的錯誤結果。"""
-    if '總金額' not in text:
+    """從 Claude 回覆重算總金額；優先從單價解析，備用固定售價表。"""
+    if '總金額' not in text and '總計' not in text:
         return text
+
+    # 優先：從「N 包（X 元/包）」格式解析
     items = _ORDER_ITEM_RE.findall(text)
-    if not items:
-        return text
-    try:
-        calculated = sum(int(qty) * int(price) for qty, price in items)
-        if calculated <= 0:
-            return text
-        return _TOTAL_REPLACE_RE.sub(lambda m: f"{m.group(1)}{calculated:,}{m.group(2)}", text)
-    except Exception:
-        return text
+    if items:
+        try:
+            calculated = sum(int(qty) * int(price) for qty, price in items)
+            if calculated > 0:
+                return _TOTAL_REPLACE_RE.sub(
+                    lambda m: f"{m.group(1)}{calculated:,}{m.group(2)}", text)
+        except Exception:
+            pass
+
+    # 備用：從已知售價表推算（避免重複比對同品項）
+    matched_names = set()
+    calculated = 0
+    for pattern, price in _ITEM_PRICE_LOOKUP:
+        key = pattern.pattern[:10]
+        if key in matched_names:
+            continue
+        m = pattern.search(text)
+        if m:
+            try:
+                calculated += int(m.group(1)) * price
+                matched_names.add(key)
+            except Exception:
+                pass
+    if calculated > 0:
+        return _TOTAL_REPLACE_RE.sub(
+            lambda m: f"{m.group(1)}{calculated:,}{m.group(2)}", text)
+    return text
 
 _ITEM_PARSE_PATTERNS = [
     (re.compile(r'(?:招牌)?豆干絲.{0,20}?(\d+)\s*包'), '招牌豆干絲', 70,  '包'),
