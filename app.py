@@ -826,6 +826,12 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
   例：<<PICKUP:王|0912345678|2026-05-09 10:00|豆干絲5包一般包裝>>
   取貨時間必須轉換為標準格式 YYYY-MM-DD HH:MM，依系統提供的【日期星期對照表】換算，不可保留中文時間描述
 
+▶ 金額計算標記：每次回覆含訂單金額、或客人詢問總金額時，在回覆最後一行加上：
+  <<CALC:品名:數量:單價|品名:數量:單價|...>>
+  例：<<CALC:豆干絲一般:50:60|豆干絲真空:2:70|油潑辣子:1:120>>
+  花生／昆布有多個份量時，每個價位各一條：<<CALC:花生100元:2:100|花生50元:6:50|昆布100元:3:100>>
+  注意：只填品名、數量、單價，絕對不要自行加總，系統會自動計算並顯示正確總金額
+
 以上標記不得讓客戶看到，資訊不齊全時絕對不加。"""
 
 RATE_LIMIT_SECONDS      = 1    # 每位用戶最少間隔秒數，防止惡意洗版
@@ -969,37 +975,70 @@ _TOTAL_UNITS_RE_CALC = re.compile(r'=\s*(\d+)\s*單位')     # 備用：Claude �
 _REMINDER_STRIP_RE   = re.compile(r'\n?\*{0,2}💡\s*小提醒[：:][^\n]*\*{0,2}')
 
 # ── Python-side 總金額校正（Claude 算術不可靠，由 Python 重算）────────────
-# 格式 1：品名 N 包（X 元/包）或 品名：N 包（X 元/包）
+CALC_TAG = re.compile(r'<<CALC:([^>]+)>>', re.IGNORECASE)
+_TOTAL_REPLACE_RE = re.compile(
+    r'((?:總金額|總計|金額合計)[：:]\*{0,2}\s*)[\d,，\+\s\d×x]*?(\d[\d,，]*)(\s*元)'
+)
+# 格式 1：品名 N 包（X 元/包）
 _ORDER_ITEM_RE = re.compile(
     r'(\d+)\s*(?:包|罐|份)[^（(\d]{0,8}[（(]\s*(\d+)\s*元\s*[/／]\s*(?:包|罐|份)[）)]'
 )
-# 格式 2：N 包 × X 元（備用，防 Claude 偶爾用 × 格式）
+# 格式 2：N 包 × X 元
 _ORDER_ITEM_CROSS_RE = re.compile(
     r'(\d+)\s*(?:包|罐|份)\s*[×xX]\s*(\d+)\s*元'
 )
-_TOTAL_REPLACE_RE = re.compile(r'((?:總金額|總計)[：:]\*{0,2}\s*)[\d,，]+(\s*元)')
+
+def _parse_calc_tag(tag_content: str) -> int:
+    """解析 <<CALC:品名:數量:單價|...>>，回傳總金額。"""
+    total = 0
+    for item in tag_content.split('|'):
+        parts = item.strip().split(':')
+        if len(parts) >= 3:
+            try:
+                total += int(parts[-2].strip()) * int(parts[-1].strip())
+            except ValueError:
+                pass
+    return total
+
+def _replace_total(text: str, total: int) -> str:
+    """用 Python 計算的正確金額取代 Claude 回覆中的任何金額行。"""
+    replaced = _TOTAL_REPLACE_RE.sub(
+        lambda m: f"{m.group(1)}{total:,}{m.group(3)}", text)
+    if replaced != text:
+        return replaced
+    # 找不到標準格式時，附加在最後
+    return text + f"\n\n**總金額：{total:,} 元**"
 
 def inject_correct_total(text: str) -> str:
-    """從 Claude 回覆重算總金額；格式 1 優先，格式 2 備用。"""
-    if '總金額' not in text and '總計' not in text:
-        return text
+    """優先用 <<CALC>> 標籤計算；無標籤時退回 regex 解析。"""
+    # 法 0（最可靠）：<<CALC>> 標籤
+    m = CALC_TAG.search(text)
+    if m:
+        total = _parse_calc_tag(m.group(1))
+        if total > 0:
+            clean = CALC_TAG.sub('', text).strip()
+            return _replace_total(clean, total)
 
-    def _apply(items):
+    # 法 1：N 包（X 元/包）格式
+    items = _ORDER_ITEM_RE.findall(text)
+    if items:
         try:
             total = sum(int(q) * int(p) for q, p in items)
             if total > 0:
-                return _TOTAL_REPLACE_RE.sub(
-                    lambda m: f"{m.group(1)}{total:,}{m.group(2)}", text)
+                return _replace_total(text, total)
         except Exception:
             pass
-        return None
 
-    result = _apply(_ORDER_ITEM_RE.findall(text))
-    if result:
-        return result
-    result = _apply(_ORDER_ITEM_CROSS_RE.findall(text))
-    if result:
-        return result
+    # 法 2：N 包 × X 元 格式
+    items = _ORDER_ITEM_CROSS_RE.findall(text)
+    if items:
+        try:
+            total = sum(int(q) * int(p) for q, p in items)
+            if total > 0:
+                return _replace_total(text, total)
+        except Exception:
+            pass
+
     return text
 
 
