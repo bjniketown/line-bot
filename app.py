@@ -784,7 +784,12 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
     - 客人購買 3 包時，主動告知「4 包以上醬料獨立包裝，方便保存，是否要多帶一包？」
 17. 【素食確認】若客人詢問素食相關問題，且尚未確認是否為素食者，在**收集訂單資料期間**詢問一次即可：「請問您是素食者嗎？以便我們為您備餐。」訂單一旦成立或客人已明確表示是否素食，不得再重複詢問。素食者可食：豆干絲、天然昆布、香滷花生、油潑辣子；水餃含豬肉，素食者不可食。
 18. 【門市無餐具】客人詢問門市是否提供餐具，回覆：門市不提供餐具，請自行準備。
-19. 【禁止回答範圍（絕對執行）】以下一律回覆「不好意思，我只能回答老鄰居豆干絲的相關問題喔 😊」，不得有任何例外：
+19. 【訂單金額格式（強制）】確認訂單或顯示總金額時，每個品項必須以「品名 N 包（X 元/包）」格式列出，例：
+    - 招牌豆干絲一般包裝 50 包（60 元/包）
+    - 招牌豆干絲真空包裝 2 包（70 元/包）
+    - 油潑辣子 1 罐（120 元/罐）
+    不可使用「×」「*」或省略單價的格式。總金額另起一行：「**總金額：X,XXX 元**」
+20. 【禁止回答範圍（絕對執行）】以下一律回覆「不好意思，我只能回答老鄰居豆干絲的相關問題喔 😊」，不得有任何例外：
    - 競爭對手或其他店家的比較與評價
    - 政治、宗教、社會議題
    - 法律、醫療、財務建議
@@ -960,57 +965,37 @@ _TOTAL_UNITS_RE_CALC = re.compile(r'=\s*(\d+)\s*單位')     # 備用：Claude �
 _REMINDER_STRIP_RE   = re.compile(r'\n?\*{0,2}💡\s*小提醒[：:][^\n]*\*{0,2}')
 
 # ── Python-side 總金額校正（Claude 算術不可靠，由 Python 重算）────────────
-_ORDER_ITEM_RE   = re.compile(
+# 格式 1：品名 N 包（X 元/包）
+_ORDER_ITEM_RE = re.compile(
     r'[：:]\s*(\d+)\s*(?:包|罐|份)[^（(]*[（(]\s*(\d+)\s*元\s*[/／]\s*(?:包|罐|份)[）)]'
 )
-_TOTAL_REPLACE_RE = re.compile(r'((?:總金額|總計)[：:]\s*)[\d,，]+(\s*元)')
-
-# 備用：無單價時用固定售價推算（依品項名稱比對，順序很重要：細的放前面）
-_ITEM_PRICE_LOOKUP = [
-    (re.compile(r'豆干絲一般.{0,6}?(\d+)\s*包'),   60),
-    (re.compile(r'一般包裝.{0,6}?(\d+)\s*包'),      60),
-    (re.compile(r'豆干絲真空.{0,6}?(\d+)\s*包'),   70),
-    (re.compile(r'真空包裝.{0,6}?(\d+)\s*包'),      70),
-    (re.compile(r'(?:招牌)?豆干絲.{0,6}?(\d+)\s*包'), 70),
-    (re.compile(r'(?:香滷)?花生.{0,6}?(\d+)\s*份'),  100),
-    (re.compile(r'(?:天然)?昆布.{0,6}?(\d+)\s*份'),  100),
-    (re.compile(r'(?:油潑)?辣[子油].{0,6}?(\d+)\s*罐'), 120),
-    (re.compile(r'水餃.{0,6}?(\d+)\s*包'),           280),
-]
+# 格式 2：N 包 × X 元（備用，防 Claude 偶爾用 × 格式）
+_ORDER_ITEM_CROSS_RE = re.compile(
+    r'(\d+)\s*(?:包|罐|份)\s*[×xX]\s*(\d+)\s*元'
+)
+_TOTAL_REPLACE_RE = re.compile(r'((?:總金額|總計)[：:]\*{0,2}\s*)[\d,，]+(\s*元)')
 
 def inject_correct_total(text: str) -> str:
-    """從 Claude 回覆重算總金額；優先從單價解析，備用固定售價表。"""
+    """從 Claude 回覆重算總金額；格式 1 優先，格式 2 備用。"""
     if '總金額' not in text and '總計' not in text:
         return text
 
-    # 優先：從「N 包（X 元/包）」格式解析
-    items = _ORDER_ITEM_RE.findall(text)
-    if items:
+    def _apply(items):
         try:
-            calculated = sum(int(qty) * int(price) for qty, price in items)
-            if calculated > 0:
+            total = sum(int(q) * int(p) for q, p in items)
+            if total > 0:
                 return _TOTAL_REPLACE_RE.sub(
-                    lambda m: f"{m.group(1)}{calculated:,}{m.group(2)}", text)
+                    lambda m: f"{m.group(1)}{total:,}{m.group(2)}", text)
         except Exception:
             pass
+        return None
 
-    # 備用：從已知售價表推算（避免重複比對同品項）
-    matched_names = set()
-    calculated = 0
-    for pattern, price in _ITEM_PRICE_LOOKUP:
-        key = pattern.pattern[:10]
-        if key in matched_names:
-            continue
-        m = pattern.search(text)
-        if m:
-            try:
-                calculated += int(m.group(1)) * price
-                matched_names.add(key)
-            except Exception:
-                pass
-    if calculated > 0:
-        return _TOTAL_REPLACE_RE.sub(
-            lambda m: f"{m.group(1)}{calculated:,}{m.group(2)}", text)
+    result = _apply(_ORDER_ITEM_RE.findall(text))
+    if result:
+        return result
+    result = _apply(_ORDER_ITEM_CROSS_RE.findall(text))
+    if result:
+        return result
     return text
 
 _ITEM_PARSE_PATTERNS = [
