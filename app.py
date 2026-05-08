@@ -965,9 +965,9 @@ _TOTAL_UNITS_RE_CALC = re.compile(r'=\s*(\d+)\s*單位')     # 備用：Claude �
 _REMINDER_STRIP_RE   = re.compile(r'\n?\*{0,2}💡\s*小提醒[：:][^\n]*\*{0,2}')
 
 # ── Python-side 總金額校正（Claude 算術不可靠，由 Python 重算）────────────
-# 格式 1：品名 N 包（X 元/包）
+# 格式 1：品名 N 包（X 元/包）或 品名：N 包（X 元/包）
 _ORDER_ITEM_RE = re.compile(
-    r'[：:]\s*(\d+)\s*(?:包|罐|份)[^（(]*[（(]\s*(\d+)\s*元\s*[/／]\s*(?:包|罐|份)[）)]'
+    r'(\d+)\s*(?:包|罐|份)[^（(\d]{0,8}[（(]\s*(\d+)\s*元\s*[/／]\s*(?:包|罐|份)[）)]'
 )
 # 格式 2：N 包 × X 元（備用，防 Claude 偶爾用 × 格式）
 _ORDER_ITEM_CROSS_RE = re.compile(
