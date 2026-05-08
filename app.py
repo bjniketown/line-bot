@@ -75,7 +75,7 @@ def get_history(uid: str) -> list:
 def set_history(uid: str, history: list):
     # 同時寫入 Redis 和本地，Redis 失效時本地仍有記憶
     _local_histories[uid] = history
-    _redis(["SET", f"hist:{uid}", json.dumps(history, ensure_ascii=False), "EX", 86400])
+    _redis(["SET", f"hist:{uid}", json.dumps(history, ensure_ascii=False), "EX", 604800])
 
 
 def _fetch_qr_code_url():
