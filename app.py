@@ -993,17 +993,31 @@ _ORDER_ITEM_CROSS_RE = re.compile(
     r'(\d+)\s*(?:包|罐|份)\s*[×xX]\s*(\d+)\s*元'
 )
 
-def _parse_calc_tag(tag_content: str) -> int:
-    """解析 <<CALC:品名:數量:單價|...>>，回傳總金額。"""
-    total = 0
+def _parse_calc_tag(tag_content: str) -> tuple[int, int]:
+    """解析 <<CALC:品名:數量:單價|...>>，回傳 (產品總金額, 總單位數)。"""
+    product_total = 0
+    total_units = 0
     for item in tag_content.split('|'):
         parts = item.strip().split(':')
         if len(parts) >= 3:
             try:
-                total += int(parts[-2].strip()) * int(parts[-1].strip())
+                qty   = int(parts[-2].strip())
+                price = int(parts[-1].strip())
+                product_total += qty * price
+                total_units   += qty
             except ValueError:
                 pass
-    return total
+    return product_total, total_units
+
+def _calc_shipping(total_units: int) -> int:
+    """根據總單位數計算宅配運費。"""
+    remainder = total_units % 50
+    if remainder == 0:
+        return 0
+    elif remainder <= 38:
+        return 225
+    else:
+        return 290
 
 def _replace_total(text: str, total: int) -> str:
     """用 Python 計算的正確金額取代 Claude 回覆中的任何金額行。"""
@@ -1014,13 +1028,15 @@ def _replace_total(text: str, total: int) -> str:
     # 找不到標準格式時，附加在最後
     return text + f"\n\n**總金額：{total:,} 元**"
 
-def inject_correct_total(text: str) -> str:
+def inject_correct_total(text: str, order_type: str = None) -> str:
     """優先用 <<CALC>> 標籤計算；無標籤時退回 regex 解析。"""
     # 法 0（最可靠）：<<CALC>> 標籤
     m = CALC_TAG.search(text)
     if m:
-        total = _parse_calc_tag(m.group(1))
-        if total > 0:
+        product_total, total_units = _parse_calc_tag(m.group(1))
+        if product_total > 0:
+            shipping = _calc_shipping(total_units) if order_type == "order" else 0
+            total = product_total + shipping
             clean = CALC_TAG.sub('', text).strip()
             return _replace_total(clean, total)
 
@@ -1560,7 +1576,7 @@ def ask(uid, msg):
 
     clean, order_type, order_info = extract_order(raw)
     clean = inject_reminder(clean)
-    clean = inject_correct_total(clean)
+    clean = inject_correct_total(clean, order_type)
     clean = _auto_strip_invalid_time_warnings(clean, msg)  # 全域掃描：同時看客人原始訊息
 
     # Python-side 取貨時間驗證：Claude 不可靠，由 Python 最終裁定
