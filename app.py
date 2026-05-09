@@ -1218,7 +1218,7 @@ def inject_reminder(text: str) -> str:
     total_units = int(m_units.group(1))
     remainder   = total_units % 50
 
-    if remainder == 0 or (10 <= remainder <= 38):
+    if remainder == 0 or (11 <= remainder <= 38):
         return clean
 
     if 39 <= remainder <= 49:
@@ -1230,7 +1230,7 @@ def inject_reminder(text: str) -> str:
         )
         return _insert_after_total_line(clean, reminder)
 
-    # remainder 1–9：從品項直接計算，不依賴 Claude 的格式化金額
+    # remainder 1–10：從品項直接計算，不依賴 Claude 的格式化金額
     shipping = 225
     items = _parse_items_from_response(text)
     if not items:
