@@ -1044,9 +1044,11 @@ def inject_correct_total(text: str, order_type: str = None) -> str:
     items = _ORDER_ITEM_RE.findall(text)
     if items:
         try:
-            total = sum(int(q) * int(p) for q, p in items)
-            if total > 0:
-                return _replace_total(text, total)
+            total_units   = sum(int(q) for q, p in items)
+            product_total = sum(int(q) * int(p) for q, p in items)
+            if product_total > 0:
+                shipping = _calc_shipping(total_units) if order_type == "order" else 0
+                return _replace_total(text, product_total + shipping)
         except Exception:
             pass
 
@@ -1054,9 +1056,11 @@ def inject_correct_total(text: str, order_type: str = None) -> str:
     items = _ORDER_ITEM_CROSS_RE.findall(text)
     if items:
         try:
-            total = sum(int(q) * int(p) for q, p in items)
-            if total > 0:
-                return _replace_total(text, total)
+            total_units   = sum(int(q) for q, p in items)
+            product_total = sum(int(q) * int(p) for q, p in items)
+            if product_total > 0:
+                shipping = _calc_shipping(total_units) if order_type == "order" else 0
+                return _replace_total(text, product_total + shipping)
         except Exception:
             pass
 
@@ -1214,15 +1218,19 @@ def inject_reminder(text: str) -> str:
     if '運費' not in text:
         return clean
 
-    # 優先從 <<CALC>> 取單位數（inject_correct_total 之前執行，標記仍在）
+    # 取單位數：<<CALC>> → _parse_items_from_response → 共X單位 regex
     m_calc = CALC_TAG.search(text)
     if m_calc:
         _, total_units = _parse_calc_tag(m_calc.group(1))
     else:
-        m_units = _TOTAL_UNITS_RE_MAIN.search(text) or _TOTAL_UNITS_RE_CALC.search(text)
-        if not m_units:
-            return clean
-        total_units = int(m_units.group(1))
+        parsed_items = _parse_items_from_response(text)
+        if parsed_items:
+            total_units = sum(qty for _, qty, _, _ in parsed_items)
+        else:
+            m_units = _TOTAL_UNITS_RE_MAIN.search(text) or _TOTAL_UNITS_RE_CALC.search(text)
+            if not m_units:
+                return clean
+            total_units = int(m_units.group(1))
 
     if total_units == 0:
         return clean
