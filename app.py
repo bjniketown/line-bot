@@ -1586,7 +1586,8 @@ def ask(uid, msg):
 
     clean, order_type, order_info = extract_order(raw)
     clean = inject_reminder(clean)
-    clean = inject_correct_total(clean, order_type)
+    if order_type:
+        clean = inject_correct_total(clean, order_type)
     clean = _auto_strip_invalid_time_warnings(clean, msg)  # 全域掃描：同時看客人原始訊息
 
     # Python-side 取貨時間驗證：Claude 不可靠，由 Python 最終裁定
