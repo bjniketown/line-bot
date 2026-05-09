@@ -1211,11 +1211,21 @@ def inject_reminder(text: str) -> str:
     """Strip Claude's 小提醒, inject Python-calculated correct version."""
     clean = _REMINDER_STRIP_RE.sub('', text).rstrip()
 
-    m_units = _TOTAL_UNITS_RE_MAIN.search(text) or _TOTAL_UNITS_RE_CALC.search(text)
-    if not m_units or '運費' not in text:
+    if '運費' not in text:
         return clean
 
-    total_units = int(m_units.group(1))
+    # 優先從 <<CALC>> 取單位數（inject_correct_total 之前執行，標記仍在）
+    m_calc = CALC_TAG.search(text)
+    if m_calc:
+        _, total_units = _parse_calc_tag(m_calc.group(1))
+    else:
+        m_units = _TOTAL_UNITS_RE_MAIN.search(text) or _TOTAL_UNITS_RE_CALC.search(text)
+        if not m_units:
+            return clean
+        total_units = int(m_units.group(1))
+
+    if total_units == 0:
+        return clean
     remainder   = total_units % 50
 
     if remainder == 0 or (11 <= remainder <= 38):
