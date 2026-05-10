@@ -1019,13 +1019,17 @@ _ORDER_ITEM_CROSS_RE = re.compile(
     r'(\d+)\s*(?:包|罐|份)\s*[×xX]\s*(\d+)\s*元'
 )
 
-def _parse_calc_tag(tag_content: str) -> tuple[int, int]:
-    """解析 <<CALC:品名:數量:單價|...>>，回傳 (產品總金額, 總單位數)。"""
+def _parse_calc_tag(tag_content: str, exclude_jiaozi: bool = False) -> tuple[int, int]:
+    """解析 <<CALC:品名:數量:單價|...>>，回傳 (產品總金額, 總單位數)。
+    exclude_jiaozi=True 時排除水餃（宅配運費計算用）。"""
     product_total = 0
     total_units = 0
     for item in tag_content.split('|'):
         parts = item.strip().split(':')
         if len(parts) >= 3:
+            name = parts[0].strip()
+            if exclude_jiaozi and '水餃' in name:
+                continue
             try:
                 qty   = int(parts[-2].strip())
                 price = int(parts[-1].strip())
@@ -1247,7 +1251,7 @@ def inject_reminder(text: str) -> str:
     # 取單位數：<<CALC>> → _parse_items_from_response → 共X單位 regex
     m_calc = CALC_TAG.search(text)
     if m_calc:
-        _, total_units = _parse_calc_tag(m_calc.group(1))
+        _, total_units = _parse_calc_tag(m_calc.group(1), exclude_jiaozi=True)
     else:
         parsed_items = _parse_items_from_response(text)
         if parsed_items:
@@ -1275,8 +1279,9 @@ def inject_reminder(text: str) -> str:
         return _insert_after_total_line(clean, reminder)
 
     # remainder 1–10：從品項直接計算，不依賴 Claude 的格式化金額
+    # 水餃屬門市自取，不計入宅配運費計算（自取訂單無運費，inject_reminder 早已 return）
     shipping = 225
-    items = _parse_items_from_response(text)
+    items = [i for i in _parse_items_from_response(text) if i[0] != '水餃']
     if not items:
         return clean
     main_name, main_qty, main_price, main_unit = max(items, key=lambda x: x[1])
