@@ -1653,6 +1653,8 @@ def ask(uid, msg):
     clean = inject_reminder(clean)
     if order_type:
         clean = inject_correct_total(clean, order_type)
+    elif CALC_TAG.search(clean) and '運費' in clean:
+        clean = inject_correct_total(clean, "order")
     clean = _auto_strip_invalid_time_warnings(clean, msg)  # 全域掃描：同時看客人原始訊息
 
     # Python-side 取貨時間驗證：Claude 不可靠，由 Python 最終裁定
