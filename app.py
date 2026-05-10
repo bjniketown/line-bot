@@ -359,14 +359,15 @@ def shipping_schedule_text() -> str:
         is_auto_full = hours_left < _AUTOLOCK_HOURS  # 含今天（負數）
         (full_labels if key in full or is_auto_full else avail_labels).append(label)
     avail_str = "、".join(avail_labels[:6]) if avail_labels else "暫無"
-    lines = [f"【宅配排程】近期可出貨日：{avail_str}。"]
+    lines = []
     if full_labels:
-        lines.append(f"排程已滿（不可安排）：{'、'.join(full_labels)}。")
+        lines.append(f"【⚠️ 禁止出貨日，絕對不可違反】以下日期排程已滿，禁止安排為出貨日，即使客人主動指定也必須拒絕並改推薦可出貨日：{'、'.join(full_labels)}。")
+    lines.append(f"【宅配排程】近期可出貨日：{avail_str}。")
     lines.append(
         "出貨日安排規則（無需人工確認，直接在回覆中告知）："
-        "(1) 客人指定可出貨日 → 直接確認；"
-        "(2) 客人指定滿檔日 → 告知排程已滿，改推薦最近可出貨日；"
-        "(3) 客人未指定 → 主動安排最近一個可出貨日並告知。"
+        "(1) 客人指定可出貨日且不在禁止清單 → 直接確認；"
+        "(2) 客人指定禁止清單內的日期 → 告知排程已滿，從「近期可出貨日」推薦最近一個；"
+        "(3) 客人未指定 → 必須從上方「近期可出貨日」清單中選最近一個，不可選清單以外的日期。"
         "同時告知預計收件日（出貨日 +1 天）。"
     )
     return "\n".join(lines)
