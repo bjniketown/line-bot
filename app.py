@@ -798,7 +798,9 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
    - 豆干絲門市：預設 60 元一般包裝，報價時只報 60 元，不得主動提及真空包裝；客人主動詢問真空包時才回覆：「豆干絲真空包裝 70 元/包，門市都會少量備貨，您需要幾包呢？」
    - 昆布／花生門市：訂單成立前必須先確認份量（50 元或 100 元），不可自行假設；客人說「昆布50」「花生50」時，視為「50 元份量」而非「50 份」，但仍需回覆確認：「請問昆布是 50 元份量嗎？」再成立訂單；客人主動詢問真空包時才說明（100 元，需提前至少一天預訂才有貨）
    - 油潑辣子：120 元/罐，若需 10 罐以上請先詢問老闆庫存
-15. 【付款確認回覆】客人提供匯款末四碼時（如直接傳「7489」、「末四碼 7489」、「已匯款」、「匯好了」等），依訂單類型回覆，不得再次顯示匯款帳號資訊：
+15. 【付款確認回覆】客人說已匯款，並提供末四碼或末五碼作為憑證（如直接傳「7489」、「末四碼 7489」、「末五碼 05815」、「已匯款」、「匯好了」，或附帶轉出銀行資訊如「052渣打銀行，帳號末五碼05815」）：
+    ⚠️ 客人提到的銀行名稱（如渣打、台新、國泰…）是他自己的轉出帳戶，絕對不代表他匯到錯誤帳戶，禁止質疑客人是否匯錯帳戶、要求再確認帳號，或叫他聯絡銀行。
+    - 正確做法：直接回覆感謝，末四碼／末五碼已記錄即可，不得再次顯示匯款帳號資訊。
     - 宅配訂單：「感謝您！末四碼已記錄，我們確認後會盡快安排出貨，有任何問題歡迎隨時詢問 😊」
     - 門市自取訂單：「感謝您！末四碼已記錄，我們確認後會通知您取貨細節，有任何問題歡迎隨時詢問 😊」
 16. 【門市醬料包裝規則】一般包裝與真空包裝醬料說明完全不同，絕對不可合併計算包數：
@@ -853,10 +855,11 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
   ・取貨時間：（日期＋時間，例：5/9 上午10:00）
   ・品項：（品名＋數量）
 
-▶ 金額計算標記：每次回覆含訂單金額、或客人詢問總金額時，在回覆最後一行加上：
+▶ 金額計算標記【絕對必須，不得省略】：只要回覆中出現訂單品項或金額（包含訂單確認、金額試算、追加品項、任何含「元」的訂購回覆），必須在回覆最後一行附上：
   <<CALC:品名:數量:單價|品名:數量:單價|...>>
   例：<<CALC:豆干絲一般:50:60|豆干絲真空:2:70|油潑辣子:1:120>>
   花生／昆布有多個份量時，每個價位各一條：<<CALC:花生100元:2:100|花生50元:6:50|昆布100元:3:100>>
+  ⚠️ 漏寫 <<CALC>> 會導致系統金額計算錯誤，這是嚴重錯誤，絕對不可省略。
   注意：只填品名、數量、單價，絕對不要自行加總，系統會自動計算並顯示正確總金額
 
 以上標記不得讓客戶看到，資訊不齊全時絕對不加。"""
@@ -1042,13 +1045,9 @@ def _calc_shipping(total_units: int) -> int:
         return 290
 
 def _replace_total(text: str, total: int) -> str:
-    """用 Python 計算的正確金額取代 Claude 回覆中的任何金額行。"""
-    replaced = _TOTAL_REPLACE_RE.sub(
-        lambda m: f"{m.group(1)}{total:,}{m.group(3)}", text)
-    if replaced != text:
-        return replaced
-    # 找不到標準格式時，附加在最後
-    return text + f"\n\n**總金額：{total:,} 元**"
+    """移除所有舊總金額行（不論格式），統一在最後附加一行正確金額。"""
+    cleaned = re.sub(r'\n?\*{0,2}(?:總金額|總計|金額合計)[：:][^\n]*', '', text).rstrip()
+    return cleaned + f"\n\n**總金額：{total:,} 元**"
 
 def inject_correct_total(text: str, order_type: str = None) -> str:
     """優先用 <<CALC>> 標籤計算；無標籤時退回 regex 解析。"""
@@ -1063,7 +1062,11 @@ def inject_correct_total(text: str, order_type: str = None) -> str:
             return _replace_total(clean, total)
 
     # 法 1：N 包（X 元/包）格式
-    items = _ORDER_ITEM_RE.findall(text)
+    # 只在「訂單金額」段落之後解析，避免同一品項被訂購品項區和金額區重複計算
+    _AMOUNT_SECTION_RE = re.compile(r'(?:訂單金額|金額明細|費用明細|品項金額)', re.IGNORECASE)
+    _m_sec = _AMOUNT_SECTION_RE.search(text)
+    parse_zone = text[_m_sec.start():] if _m_sec else text
+    items = _ORDER_ITEM_RE.findall(parse_zone)
     if items:
         try:
             total_units   = sum(int(q) for q, p in items)
@@ -1074,8 +1077,8 @@ def inject_correct_total(text: str, order_type: str = None) -> str:
         except Exception:
             pass
 
-    # 法 2：N 包 × X 元 格式
-    items = _ORDER_ITEM_CROSS_RE.findall(text)
+    # 法 2：N 包 × X 元 格式（同樣只在金額段落後）
+    items = _ORDER_ITEM_CROSS_RE.findall(parse_zone)
     if items:
         try:
             total_units   = sum(int(q) for q, p in items)
