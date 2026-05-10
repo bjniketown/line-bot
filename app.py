@@ -1019,6 +1019,25 @@ _ORDER_ITEM_CROSS_RE = re.compile(
     r'(\d+)\s*(?:包|罐|份)\s*[×xX]\s*(\d+)\s*元'
 )
 
+def _parse_calc_items(tag_content: str, exclude_jiaozi: bool = False) -> list:
+    """解析 <<CALC>> 回傳品項清單 [(名稱, 數量, 單價, 單位)]，供划算提醒使用。"""
+    items = []
+    for item in tag_content.split('|'):
+        parts = item.strip().split(':')
+        if len(parts) >= 3:
+            name = parts[0].strip()
+            if exclude_jiaozi and '水餃' in name:
+                continue
+            try:
+                qty   = int(parts[-2].strip())
+                price = int(parts[-1].strip())
+                if qty > 0:
+                    unit = '包' if '水餃' in name or '豆干' in name else '份' if '花生' in name or '昆布' in name else '罐'
+                    items.append((name, qty, price, unit))
+            except ValueError:
+                pass
+    return items
+
 def _parse_calc_tag(tag_content: str, exclude_jiaozi: bool = False) -> tuple[int, int]:
     """解析 <<CALC:品名:數量:單價|...>>，回傳 (產品總金額, 總單位數)。
     exclude_jiaozi=True 時排除水餃（宅配運費計算用）。"""
@@ -1278,10 +1297,13 @@ def inject_reminder(text: str) -> str:
         )
         return _insert_after_total_line(clean, reminder)
 
-    # remainder 1–10：從品項直接計算，不依賴 Claude 的格式化金額
+    # remainder 1–10：優先從 <<CALC>> 取品項，備用才用文字 regex
     # 水餃屬門市自取，不計入宅配運費計算（自取訂單無運費，inject_reminder 早已 return）
     shipping = 225
-    items = [i for i in _parse_items_from_response(text) if i[0] != '水餃']
+    if m_calc:
+        items = _parse_calc_items(m_calc.group(1), exclude_jiaozi=True)
+    else:
+        items = [i for i in _parse_items_from_response(text) if i[0] != '水餃']
     if not items:
         return clean
     main_name, main_qty, main_price, main_unit = max(items, key=lambda x: x[1])
