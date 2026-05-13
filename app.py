@@ -964,9 +964,9 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
 
 【訂單完成標記（系統專用，重要）】
 
-▶ 宅配訂單：當客戶提供以下四項資料（缺一不可），在回覆中主動附上匯款資訊，並在最後一行加上標記：
+▶ 宅配訂單：當客戶提供收件人全名、電話、地址、品項與數量後，立即在回覆中附上匯款資訊並加上 <<ORDER>> 標記，不需等待客人再次確認：
   必要資料：收件人全名、收件地址、聯絡電話、品項與數量
-  （出貨日期不在此，由客服另行確認）
+  ⚠️ 重要：在同一則回覆中同時完成：①列出訂單明細 ②告知出貨日期 ③附上匯款資訊 ④加上 <<ORDER>> 標記。客人看到匯款資訊即視為訂單成立，無需等客人回覆「可以」。
 
   訂單確認後，回覆內容必須包含以下匯款資訊：
   ────────────────
@@ -1847,6 +1847,8 @@ def ask(uid, msg):
     clean = inject_reminder(clean)
     if order_type:
         clean = inject_correct_total(clean, order_type)
+    else:
+        clean = CALC_TAG.sub('', clean).strip()  # 無訂單標記時也要清掉 CALC 標籤
     clean = _auto_strip_invalid_time_warnings(clean, msg)  # 全域掃描：同時看客人原始訊息
 
     # Python-side 取貨時間驗證：Claude 不可靠，由 Python 最終裁定
