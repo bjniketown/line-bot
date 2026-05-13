@@ -2143,6 +2143,12 @@ def store_admin():
 
         "<div class='wrap'>"
 
+        # ── 快速導覽 ──────────────────────────────────────────────────
+        "<div style='display:flex;gap:10px;margin-bottom:16px'>"
+        f"<a href='/orders?token={token}' style='flex:1;padding:12px;background:#5c3d1e;color:#fff;border-radius:10px;text-align:center;text-decoration:none;font-size:14px'>📋 訂單紀錄</a>"
+        f"<a href='/customers?token={token}' style='flex:1;padding:12px;background:#8b5e3c;color:#fff;border-radius:10px;text-align:center;text-decoration:none;font-size:14px'>👥 客戶資料</a>"
+        "</div>"
+
         # ── 門市接單 ──────────────────────────────────────────────────
         "<div class='sec-t'>門市接單</div>"
         "<div class='card'>"
@@ -2339,6 +2345,7 @@ tr:hover td{background:#fdf3e7}
         "<meta name='referrer' content='no-referrer'>"
         f"<title>老鄰居 · 客戶資料</title>{css}"
         "</head><body>"
+        f"<a href='/store?token={token}' style='display:inline-block;margin-bottom:12px;padding:7px 14px;background:#5c3d1e;color:#fff;border-radius:8px;text-decoration:none;font-size:13px'>← 回首頁</a>"
         "<h1>老鄰居豆干絲 · 客戶資料庫</h1>"
         "<div class='toolbar'>"
         f"<form method='get' action='/customers' style='display:flex;gap:8px;align-items:center'>"
@@ -2471,6 +2478,7 @@ tr:hover td{background:#fdf3e7}
         "<meta name='referrer' content='no-referrer'>"
         f"<title>老鄰居 · 訂單紀錄</title>{css}"
         "</head><body>"
+        f"<a href='/store?token={token}' style='display:inline-block;margin-bottom:12px;padding:7px 14px;background:#5c3d1e;color:#fff;border-radius:8px;text-decoration:none;font-size:13px'>← 回首頁</a>"
         "<h1>老鄰居豆干絲 · 訂單紀錄</h1>"
         f"<div class='tabs'>{tab_delivery}{tab_pickup}</div>"
         "<div class='toolbar'>"
