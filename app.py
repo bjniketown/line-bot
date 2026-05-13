@@ -356,28 +356,42 @@ def _mask_address(address: str) -> str:
         return f"{prefix}****{suffix}"
     return address[:4] + '****'
 
-def _save_order_record(order_type: str, order_info: str, reply_text: str):
-    """將成立的訂單存入 Redis，key = order:{timestamp}:{type}，TTL 180 天。"""
+def _save_order_record(order_type: str, order_info: str, reply_text: str, uid: str = ""):
+    """將成立的訂單存入 Redis，key = order:{timestamp}:{type}，TTL 180 天。
+    優先使用 Redis 完整客戶資料，避免存入 Claude 產生的遮罩版本。"""
     now_tw = datetime.now(_TZ_TW)
     ts = now_tw.strftime("%Y%m%d%H%M%S")
     parts = [p.strip() for p in order_info.split("|")]
+
+    # 從 order_info 取電話（第2欄），嘗試從 Redis 撈完整資料
+    raw_phone = parts[1] if len(parts) > 1 else ""
+    full = {}
+    if uid:
+        full = get_customer_profile(uid)
+    if not full and raw_phone:
+        norm = normalize_phone(raw_phone)
+        full = get_phone_profile(norm)
+
+    def _full(field, fallback):
+        return full.get(field, "") or fallback
+
     if order_type == "order":
         record = {
             "type": "宅配",
-            "name": parts[0] if len(parts) > 0 else "",
-            "phone": parts[1] if len(parts) > 1 else "",
-            "address": parts[2] if len(parts) > 2 else "",
-            "items": parts[3] if len(parts) > 3 else "",
-            "time": now_tw.strftime("%Y-%m-%d %H:%M"),
+            "name":    _full("name",    parts[0] if len(parts) > 0 else ""),
+            "phone":   _full("phone",   raw_phone),
+            "address": _full("address", parts[2] if len(parts) > 2 else ""),
+            "items":   parts[3] if len(parts) > 3 else "",
+            "time":    now_tw.strftime("%Y-%m-%d %H:%M"),
         }
     else:
         record = {
             "type": "店取",
-            "name": parts[0] if len(parts) > 0 else "",
-            "phone": parts[1] if len(parts) > 1 else "",
+            "name":        _full("name",  parts[0] if len(parts) > 0 else ""),
+            "phone":       _full("phone", raw_phone),
             "pickup_time": parts[2] if len(parts) > 2 else "",
-            "items": parts[3] if len(parts) > 3 else "",
-            "time": now_tw.strftime("%Y-%m-%d %H:%M"),
+            "items":       parts[3] if len(parts) > 3 else "",
+            "time":        now_tw.strftime("%Y-%m-%d %H:%M"),
         }
     key = f"order:{ts}:{order_type}"
     _redis(["SET", key, json.dumps(record, ensure_ascii=False), "EX", 15552000])
@@ -1851,7 +1865,7 @@ def ask(uid, msg):
                 "phone": parts[1].strip(),
                 "address": parts[2].strip(),
             })
-        _save_order_record(order_type, order_info, clean)
+        _save_order_record(order_type, order_info, clean, uid)
 
     history.append({"role": "assistant", "content": clean})
     set_history(uid, history)
