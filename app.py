@@ -398,14 +398,16 @@ def customer_profile_text(uid: str, current_msg: str = "") -> str:
     if p.get("address"):
         lines.append(f"上次宅配地址：{masked_address}")
         lines.append(
-            "→ 若客人選擇宅配，主動詢問「請問這次收件資料與上次相同嗎？（收件人 / 地址 / 電話）」；"
+            f"→ 若客人選擇宅配，主動詢問「請問這次收件資料與上次相同嗎？"
+            f"（收件人：{masked_name} / 電話：{masked_phone} / 地址：{masked_address}）」；"
             "客人確認相同後直接沿用內部完整資料，不在對話中顯示完整地址；"
             "客人說不同時，詢問哪個部分要更改，其餘沿用。"
         )
     else:
         lines.append(
-            "→ 此客人為門市自取回訪客人，姓名與電話已確認，絕對不可再詢問姓名或電話，"
-            "直接沿用上方資料，門市自取只需再詢問預計取貨日期與時間即可成立訂單。"
+            f"→ 此客人為門市自取回訪客人，姓名（{masked_name}）與電話（{masked_phone}）已確認，"
+            "絕對不可再詢問姓名或電話，"
+            f"主動告知「您好 {masked_name}！請問這次預計什麼時候來取貨呢？」直接進入取貨時間確認。"
         )
     return "\n".join(lines)
 
