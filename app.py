@@ -364,15 +364,17 @@ def save_customer_profile(uid: str, profile: dict):
     if profile.get("phone"):
         save_phone_profile(profile["phone"], profile)
 
-def customer_profile_text(uid: str) -> str:
+def customer_profile_text(uid: str, current_msg: str = "") -> str:
     """回傳客人資料提示，供每次呼叫 Claude 時動態注入。
-    優先查 profile:{uid}；找不到時從對話記憶抓電話查 phone_profile，找到後升級綁定。"""
+    優先查 profile:{uid}；找不到時從對話記憶+當次訊息抓電話查 phone_profile，找到後升級綁定。"""
     p = get_customer_profile(uid)
 
-    # 若 UID 無資料，嘗試從對話記憶中抓電話比對歷史資料
+    # 若 UID 無資料，嘗試從對話記憶+當次訊息中抓電話比對歷史資料
     if not p:
         history = get_history(uid)
         all_text = " ".join(m["content"] for m in history[-10:])
+        if current_msg:
+            all_text += " " + current_msg
         phone_match = re.search(r'09\d{8}', all_text)
         if phone_match:
             p = get_phone_profile(phone_match.group())
@@ -1751,8 +1753,9 @@ def _full_date_warning(history: list) -> str:
 
 def _call_claude(history: list, uid: str = "") -> str:
     """依序嘗試 _MODELS，第一個成功的回傳結果；全部失敗才丟例外。"""
+    current_msg = history[-1]["content"] if history and history[-1]["role"] == "user" else ""
     extras = [s for s in (store_status_text(), dumpling_soldout_text(), chili_soldout_text(),
-                          busy_season_text(), shipping_schedule_text(), customer_profile_text(uid)) if s]
+                          busy_season_text(), shipping_schedule_text(), customer_profile_text(uid, current_msg)) if s]
     system_blocks = [
         {"type": "text", "text": SYSTEM_TEXT,
          "cache_control": {"type": "ephemeral"}},
