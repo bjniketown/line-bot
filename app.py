@@ -2211,31 +2211,40 @@ def customers_admin():
     if not ADMIN_TOKEN or token != ADMIN_TOKEN:
         abort(403)
 
+    def _fetch_all_profiles():
+        keys = _redis(["KEYS", "phone_profile:*"]) or []
+        if not keys:
+            return []
+        profiles = []
+        batch = 100
+        for i in range(0, len(keys), batch):
+            chunk = keys[i:i+batch]
+            vals = _redis(["MGET"] + chunk) or []
+            for raw in vals:
+                if not raw:
+                    continue
+                try:
+                    profiles.append(json.loads(raw))
+                except Exception:
+                    pass
+        return profiles
+
     action = request.args.get("action", "")
     if action == "export":
-        # 撈所有 phone_profile:* 資料匯出 CSV
-        keys = _redis(["KEYS", "phone_profile:*"]) or []
+        import io, csv as _csv
+        from flask import Response
         rows = []
-        for k in sorted(keys):
-            raw = _redis(["GET", k])
-            if not raw:
-                continue
-            try:
-                p = json.loads(raw)
-            except Exception:
-                continue
+        for p in _fetch_all_profiles():
             rows.append([
                 p.get("name", ""),
                 p.get("phone", ""),
                 p.get("address", ""),
                 p.get("source", ""),
             ])
-        import io, csv as _csv
         buf = io.StringIO()
         w = _csv.writer(buf)
         w.writerow(["姓名", "電話", "地址", "來源"])
         w.writerows(rows)
-        from flask import Response
         return Response(
             "﻿" + buf.getvalue(),
             mimetype="text/csv; charset=utf-8",
@@ -2244,16 +2253,8 @@ def customers_admin():
 
     # 搜尋
     q = request.args.get("q", "").strip()
-    keys = _redis(["KEYS", "phone_profile:*"]) or []
     customers = []
-    for k in sorted(keys):
-        raw = _redis(["GET", k])
-        if not raw:
-            continue
-        try:
-            p = json.loads(raw)
-        except Exception:
-            continue
+    for p in _fetch_all_profiles():
         if q and q not in p.get("name", "") and q not in p.get("phone", "") and q not in p.get("address", ""):
             continue
         customers.append(p)
