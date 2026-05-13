@@ -1605,6 +1605,51 @@ _MODELS = [
     "claude-haiku-3-5-20241022",  # fallback 2：上一代 haiku
 ]
 
+_CONVO_DATE_RE = re.compile(r'(\d{1,2})[/月](\d{1,2})')
+
+def _full_date_warning(history: list) -> str:
+    """偵測對話中是否出現滿檔日期，若有回傳針對性警告，否則回傳空字串。"""
+    full_dates = get_shipping_full_dates()
+    if not full_dates:
+        return ""
+    year = datetime.now(_TZ_TW).year
+    all_text = " ".join(m["content"] for m in history[-6:])
+    found = []
+    for m in _CONVO_DATE_RE.finditer(all_text):
+        try:
+            month, day = int(m.group(1)), int(m.group(2))
+            key = f"{year}-{month:02d}-{day:02d}"
+            if key in full_dates and key not in found:
+                found.append(key)
+        except ValueError:
+            pass
+    if not found:
+        return ""
+    # 找下一個可出貨日供 Claude 直接使用
+    now = datetime.now(_TZ_TW)
+    next_avail = ""
+    for i in range(1, 22):
+        d = now + timedelta(days=i)
+        if d.weekday() not in {0, 2, 4}:
+            continue
+        key = d.strftime("%Y-%m-%d")
+        d_midnight = d.replace(hour=0, minute=0, second=0, microsecond=0)
+        hours_left = (d_midnight - now).total_seconds() / 3600
+        if key not in full_dates and hours_left >= _AUTOLOCK_HOURS:
+            next_avail = f"{d.month}/{d.day:02d}（{_WEEKDAYS[d.weekday()]}）"
+            break
+    dates_str = "、".join(
+        f"{int(k[5:7])}/{int(k[8:10])}" for k in found
+    )
+    warning = (
+        f"🚨【本次對話即時警告】對話中出現的 {dates_str} 排程已滿，"
+        f"本次回覆絕對不可確認該日期為出貨日，不得有任何例外。"
+    )
+    if next_avail:
+        warning += f"必須告知排程已滿，並改推薦最近可出貨日：{next_avail}。"
+    return warning
+
+
 def _call_claude(history: list, uid: str = "") -> str:
     """依序嘗試 _MODELS，第一個成功的回傳結果；全部失敗才丟例外。"""
     extras = [s for s in (store_status_text(), dumpling_soldout_text(), chili_soldout_text(),
@@ -1614,6 +1659,9 @@ def _call_claude(history: list, uid: str = "") -> str:
          "cache_control": {"type": "ephemeral"}},
         {"type": "text", "text": current_date_text() + ("".join(f"\n{s}" for s in extras))},
     ]
+    full_warn = _full_date_warning(history)
+    if full_warn:
+        system_blocks.append({"type": "text", "text": full_warn})
     last_err = None
     for model in _MODELS:
         try:
