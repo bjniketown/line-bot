@@ -357,7 +357,9 @@ def _mask_address(address: str) -> str:
     return address[:4] + '****'
 
 def save_customer_profile(uid: str, profile: dict):
-    """儲存客人資料，TTL 一年，同步更新 phone_profile。"""
+    """儲存客人資料，TTL 一年，同步更新 phone_profile。老闆 UID 不儲存（測試用）。"""
+    if uid and OWNER_LINE_UID and uid == OWNER_LINE_UID:
+        return
     _redis(["SET", f"profile:{uid}", json.dumps(profile, ensure_ascii=False), "EX", 31536000])
     if profile.get("phone"):
         save_phone_profile(profile["phone"], profile)
