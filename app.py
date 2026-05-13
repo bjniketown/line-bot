@@ -2205,5 +2205,116 @@ def store_admin():
     )
 
 
+@app.route("/customers")
+def customers_admin():
+    token = request.args.get("token", "")
+    if not ADMIN_TOKEN or token != ADMIN_TOKEN:
+        abort(403)
+
+    action = request.args.get("action", "")
+    if action == "export":
+        # 撈所有 phone_profile:* 資料匯出 CSV
+        keys = _redis(["KEYS", "phone_profile:*"]) or []
+        rows = []
+        for k in sorted(keys):
+            raw = _redis(["GET", k])
+            if not raw:
+                continue
+            try:
+                p = json.loads(raw)
+            except Exception:
+                continue
+            rows.append([
+                p.get("name", ""),
+                p.get("phone", ""),
+                p.get("address", ""),
+                p.get("source", ""),
+            ])
+        import io, csv as _csv
+        buf = io.StringIO()
+        w = _csv.writer(buf)
+        w.writerow(["姓名", "電話", "地址", "來源"])
+        w.writerows(rows)
+        from flask import Response
+        return Response(
+            "﻿" + buf.getvalue(),
+            mimetype="text/csv; charset=utf-8",
+            headers={"Content-Disposition": "attachment; filename=customers.csv"},
+        )
+
+    # 搜尋
+    q = request.args.get("q", "").strip()
+    keys = _redis(["KEYS", "phone_profile:*"]) or []
+    customers = []
+    for k in sorted(keys):
+        raw = _redis(["GET", k])
+        if not raw:
+            continue
+        try:
+            p = json.loads(raw)
+        except Exception:
+            continue
+        if q and q not in p.get("name", "") and q not in p.get("phone", "") and q not in p.get("address", ""):
+            continue
+        customers.append(p)
+
+    rows_html = ""
+    for p in customers:
+        name    = p.get("name", "")
+        phone   = p.get("phone", "")
+        address = p.get("address", "（無）")
+        source  = p.get("source", "")
+        rows_html += (
+            f"<tr>"
+            f"<td>{name}</td>"
+            f"<td>{phone}</td>"
+            f"<td style='font-size:12px'>{address}</td>"
+            f"<td style='font-size:11px;color:#999'>{source}</td>"
+            f"</tr>"
+        )
+
+    total = len(customers)
+    css = """
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Noto Sans TC',sans-serif;background:#fdf8f2;color:#3b2a1a;padding:16px}
+h1{font-size:18px;margin-bottom:12px;color:#5c3d1e}
+.toolbar{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;align-items:center}
+input[type=text]{padding:8px 12px;border:1.5px solid #c9a96e;border-radius:8px;font-size:14px;background:#fffdf8;width:220px}
+.btn{padding:8px 16px;border-radius:8px;border:none;cursor:pointer;font-size:13px;text-decoration:none;display:inline-block}
+.btn-g{background:#4caf50;color:#fff}
+.btn-b{background:#2196f3;color:#fff}
+.cnt{font-size:13px;color:#888;margin-left:auto}
+table{width:100%;border-collapse:collapse;background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+th{background:#5c3d1e;color:#fff;padding:10px 12px;font-size:13px;text-align:left}
+td{padding:9px 12px;border-bottom:1px solid #f0e8da;font-size:13px}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:#fdf3e7}
+</style>
+"""
+    return (
+        "<!DOCTYPE html><html lang='zh-Hant'><head>"
+        "<meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<meta name='referrer' content='no-referrer'>"
+        f"<title>老鄰居 · 客戶資料</title>{css}"
+        "</head><body>"
+        "<h1>老鄰居豆干絲 · 客戶資料庫</h1>"
+        "<div class='toolbar'>"
+        f"<form method='get' action='/customers' style='display:flex;gap:8px;align-items:center'>"
+        f"<input type='hidden' name='token' value='{token}'>"
+        f"<input type='text' name='q' placeholder='搜尋姓名 / 電話 / 地址' value='{q}'>"
+        "<button class='btn btn-b' type='submit'>搜尋</button>"
+        "</form>"
+        f"<a class='btn btn-g' href='/customers?token={token}&action=export'>匯出 CSV</a>"
+        f"<span class='cnt'>共 {total} 筆</span>"
+        "</div>"
+        "<table>"
+        "<thead><tr><th>姓名</th><th>電話</th><th>地址</th><th>來源</th></tr></thead>"
+        f"<tbody>{rows_html}</tbody>"
+        "</table>"
+        "</body></html>"
+    )
+
+
 if __name__ == "__main__":
     app.run()
