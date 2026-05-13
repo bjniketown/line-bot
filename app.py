@@ -1812,14 +1812,6 @@ def ask(uid, msg):
                 "phone": parts[1].strip(),
                 "address": parts[2].strip(),
             })
-        elif order_type == "pickup" and len(parts) >= 2:
-            existing = get_customer_profile(uid)
-            save_customer_profile(uid, {
-                **existing,
-                "name": parts[0].strip(),
-                "phone": parts[1].strip(),
-                "address": existing.get("address", ""),
-            })
 
     history.append({"role": "assistant", "content": clean})
     set_history(uid, history)
