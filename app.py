@@ -356,6 +356,32 @@ def _mask_address(address: str) -> str:
         return f"{prefix}****{suffix}"
     return address[:4] + '****'
 
+def _save_order_record(order_type: str, order_info: str, reply_text: str):
+    """將成立的訂單存入 Redis，key = order:{timestamp}:{type}，TTL 180 天。"""
+    now_tw = datetime.now(_TZ_TW)
+    ts = now_tw.strftime("%Y%m%d%H%M%S")
+    parts = [p.strip() for p in order_info.split("|")]
+    if order_type == "order":
+        record = {
+            "type": "宅配",
+            "name": parts[0] if len(parts) > 0 else "",
+            "phone": parts[1] if len(parts) > 1 else "",
+            "address": parts[2] if len(parts) > 2 else "",
+            "items": parts[3] if len(parts) > 3 else "",
+            "time": now_tw.strftime("%Y-%m-%d %H:%M"),
+        }
+    else:
+        record = {
+            "type": "店取",
+            "name": parts[0] if len(parts) > 0 else "",
+            "phone": parts[1] if len(parts) > 1 else "",
+            "pickup_time": parts[2] if len(parts) > 2 else "",
+            "items": parts[3] if len(parts) > 3 else "",
+            "time": now_tw.strftime("%Y-%m-%d %H:%M"),
+        }
+    key = f"order:{ts}:{order_type}"
+    _redis(["SET", key, json.dumps(record, ensure_ascii=False), "EX", 15552000])
+
 def save_customer_profile(uid: str, profile: dict):
     """儲存客人資料，TTL 一年，同步更新 phone_profile。老闆 UID 不儲存（測試用）。"""
     if uid and OWNER_LINE_UID and uid == OWNER_LINE_UID:
@@ -855,7 +881,7 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
    - 意圖判斷：客人回應含「問題」「詢問」「想問」「請問」等詞，代表客人是在**提問**而非確認取貨方式，應先了解問題再繼續；只有明確說「門市」「自取」「宅配」「到府」才算確認
    - 【電話優先流程】客人確認宅配或自取後：
      • 系統已注入【回訪客人資料】→ 直接詢問「請問這次資料與上次相同嗎？」，客人確認後直接沿用，絕對不可再問電話或姓名
-     • 系統未注入【回訪客人資料】→ 第一步先詢問聯絡電話，系統比對後若有舊資料會自動注入，再問「請問這次資料與上次相同嗎？」；若無舊資料，收到電話後繼續收集其餘必要資料
+     • 系統未注入【回訪客人資料】→ 第一步必須固定回覆「好的！請問您的聯絡電話呢？😊」，不可自行改寫；系統比對後若有舊資料會自動注入，再詢問「請問這次資料與上次相同嗎？（顯示遮罩資料）」；若無舊資料，收到電話後繼續收集其餘必要資料
    - 門市自取：收集 電話、貴姓、預計取貨日期/時間（三項，缺一不可；有舊資料時姓名自動沿用）
    - 宅配：收集 電話、收件人全名、收件地址、品項數量（四項缺一不可；有舊資料時姓名與地址可沿用）
 9. 【水餃宅配限制】水餃僅限門市自取，絕對不可宅配：
@@ -990,9 +1016,9 @@ EXACT_REPLIES = {
     "再見": "謝謝光臨，歡迎再來！😊",
     "掰掰": "謝謝光臨，歡迎再來！😊",
     "bye":  "謝謝光臨，歡迎再來！😊",
-    "店取": "好的！請問您的聯絡電話呢？我幫您確認是否有舊資料可以沿用 😊",
-    "自取": "好的！請問您的聯絡電話呢？我幫您確認是否有舊資料可以沿用 😊",
-    "宅配": "好的！請問您的聯絡電話呢？我幫您確認是否有舊資料可以沿用 😊",
+    "店取": "好的！請問您的聯絡電話呢？😊",
+    "自取": "好的！請問您的聯絡電話呢？😊",
+    "宅配": "好的！請問您的聯絡電話呢？😊",
 }
 
 # 只要訊息包含以下任一關鍵字，直接回傳對應答案（不呼叫 Claude）
@@ -1825,6 +1851,7 @@ def ask(uid, msg):
                 "phone": parts[1].strip(),
                 "address": parts[2].strip(),
             })
+        _save_order_record(order_type, order_info, clean)
 
     history.append({"role": "assistant", "content": clean})
     set_history(uid, history)
@@ -2325,6 +2352,134 @@ tr:hover td{background:#fdf3e7}
         "<table>"
         "<thead><tr><th>姓名</th><th>電話</th><th>地址</th><th>來源</th></tr></thead>"
         f"<tbody>{rows_html}</tbody>"
+        "</table>"
+        "</body></html>"
+    )
+
+
+@app.route("/orders")
+def orders_admin():
+    token = request.args.get("token", "")
+    if not ADMIN_TOKEN or token != ADMIN_TOKEN:
+        abort(403)
+
+    action = request.args.get("action", "")
+    tab    = request.args.get("tab", "delivery")  # delivery | pickup
+
+    def _fetch_orders(order_type_filter):
+        keys = _redis(["KEYS", f"order:*:{order_type_filter}"]) or []
+        records = []
+        if not keys:
+            return records
+        vals = _redis(["MGET"] + sorted(keys, reverse=True)) or []
+        for raw in vals:
+            if not raw:
+                continue
+            try:
+                records.append(json.loads(raw))
+            except Exception:
+                pass
+        return records
+
+    if action == "export":
+        import io, csv as _csv
+        from flask import Response
+        otype = "order" if tab == "delivery" else "pickup"
+        rows = _fetch_orders(otype)
+        buf = io.StringIO()
+        w = _csv.writer(buf)
+        if tab == "delivery":
+            w.writerow(["下單時間", "姓名", "電話", "地址", "品項"])
+            for r in rows:
+                w.writerow([r.get("time",""), r.get("name",""), r.get("phone",""), r.get("address",""), r.get("items","")])
+        else:
+            w.writerow(["下單時間", "姓名", "電話", "取貨時間", "品項"])
+            for r in rows:
+                w.writerow([r.get("time",""), r.get("name",""), r.get("phone",""), r.get("pickup_time",""), r.get("items","")])
+        return Response(
+            "﻿" + buf.getvalue(),
+            mimetype="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f"attachment; filename=orders_{tab}.csv"},
+        )
+
+    delivery_rows = _fetch_orders("order")
+    pickup_rows   = _fetch_orders("pickup")
+
+    def _render_rows(rows, tab_type):
+        if not rows:
+            return "<tr><td colspan='6' style='text-align:center;color:#aaa;padding:20px'>尚無資料</td></tr>"
+        html = ""
+        for r in rows:
+            if tab_type == "delivery":
+                html += (
+                    f"<tr>"
+                    f"<td>{r.get('time','')}</td>"
+                    f"<td>{r.get('name','')}</td>"
+                    f"<td>{r.get('phone','')}</td>"
+                    f"<td style='font-size:11px'>{r.get('address','')}</td>"
+                    f"<td style='font-size:11px'>{r.get('items','')}</td>"
+                    f"</tr>"
+                )
+            else:
+                html += (
+                    f"<tr>"
+                    f"<td>{r.get('time','')}</td>"
+                    f"<td>{r.get('name','')}</td>"
+                    f"<td>{r.get('phone','')}</td>"
+                    f"<td>{r.get('pickup_time','')}</td>"
+                    f"<td style='font-size:11px'>{r.get('items','')}</td>"
+                    f"</tr>"
+                )
+        return html
+
+    css = """<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Noto Sans TC',sans-serif;background:#fdf8f2;color:#3b2a1a;padding:16px}
+h1{font-size:18px;margin-bottom:14px;color:#5c3d1e}
+.tabs{display:flex;gap:8px;margin-bottom:14px}
+.tab{padding:8px 20px;border-radius:8px 8px 0 0;border:1.5px solid #c9a96e;background:#fff;cursor:pointer;font-size:13px;text-decoration:none;color:#5c3d1e}
+.tab.active{background:#5c3d1e;color:#fff;border-color:#5c3d1e}
+.toolbar{display:flex;gap:8px;margin-bottom:12px;align-items:center}
+.btn{padding:8px 16px;border-radius:8px;border:none;cursor:pointer;font-size:13px;text-decoration:none;display:inline-block}
+.btn-g{background:#4caf50;color:#fff}
+.cnt{font-size:13px;color:#888;margin-left:auto}
+table{width:100%;border-collapse:collapse;background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+th{background:#5c3d1e;color:#fff;padding:10px 12px;font-size:13px;text-align:left}
+td{padding:9px 12px;border-bottom:1px solid #f0e8da;font-size:13px}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:#fdf3e7}
+</style>"""
+
+    if tab == "delivery":
+        active_rows = _render_rows(delivery_rows, "delivery")
+        cnt = len(delivery_rows)
+        headers = "<tr><th>下單時間</th><th>姓名</th><th>電話</th><th>地址</th><th>品項</th></tr>"
+        export_url = f"/orders?token={token}&tab=delivery&action=export"
+        tab_delivery = f"<a class='tab active' href='/orders?token={token}&tab=delivery'>🚚 宅配（{len(delivery_rows)}）</a>"
+        tab_pickup   = f"<a class='tab' href='/orders?token={token}&tab=pickup'>🏪 店取（{len(pickup_rows)}）</a>"
+    else:
+        active_rows = _render_rows(pickup_rows, "pickup")
+        cnt = len(pickup_rows)
+        headers = "<tr><th>下單時間</th><th>姓名</th><th>電話</th><th>取貨時間</th><th>品項</th></tr>"
+        export_url = f"/orders?token={token}&tab=pickup&action=export"
+        tab_delivery = f"<a class='tab' href='/orders?token={token}&tab=delivery'>🚚 宅配（{len(delivery_rows)}）</a>"
+        tab_pickup   = f"<a class='tab active' href='/orders?token={token}&tab=pickup'>🏪 店取（{len(pickup_rows)}）</a>"
+
+    return (
+        "<!DOCTYPE html><html lang='zh-Hant'><head>"
+        "<meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<meta name='referrer' content='no-referrer'>"
+        f"<title>老鄰居 · 訂單紀錄</title>{css}"
+        "</head><body>"
+        "<h1>老鄰居豆干絲 · 訂單紀錄</h1>"
+        f"<div class='tabs'>{tab_delivery}{tab_pickup}</div>"
+        "<div class='toolbar'>"
+        f"<a class='btn btn-g' href='{export_url}'>匯出 CSV</a>"
+        f"<span class='cnt'>共 {cnt} 筆</span>"
+        "</div>"
+        "<table>"
+        f"<thead>{headers}</thead>"
+        f"<tbody>{active_rows}</tbody>"
         "</table>"
         "</body></html>"
     )
