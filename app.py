@@ -318,7 +318,7 @@ def customer_profile_text(uid: str) -> str:
         lines.append(f"上次宅配地址：{p['address']}")
         lines.append("→ 若客人選擇宅配，主動詢問「是否沿用上次的收件資料？」，客人確認後直接使用，不需重複收集。")
     else:
-        lines.append("→ 此客人為門市自取客人，可沿用姓名與電話，地址需重新收集。")
+        lines.append("→ 此客人為門市自取回訪客人，姓名與電話已確認，絕對不可再詢問姓名或電話，直接沿用上方資料，門市自取只需再詢問預計取貨日期與時間即可成立訂單。")
     return "\n".join(lines)
 
 def get_shipping_full_dates() -> set:
@@ -1376,7 +1376,12 @@ def quick_rule_reply(text, uid=None):
     # 門市停單（非連假）：只攔截今日取貨；含未來日期的讓 Claude 判斷（預約未來自取照常接單）
     elif store_status_text() and any(kw in t for kw in ("自取", "店取", "門市取", "取貨", "來店")):
         if not any(kw in t for kw in _FUTURE_DATE_KW):
-            return "非常抱歉，今日門市暫停接單 🙏\n若您方便改天前來，歡迎直接告知預計取貨日期，我為您安排 😊\n宅配照常服務，如有需要也可改宅配喔！"
+            _, closed_msg = _parse_store_closed()
+            if "公休" in closed_msg:
+                store_reply = "非常抱歉，今日門市臨時公休暫停接單 🙏\n若方便改天前來，歡迎告知預計取貨日期，我為您安排 😊\n宅配照常服務，如有需要也可改宅配喔！"
+            else:
+                store_reply = "非常抱歉，今日門市已經提前完售所以暫停接單 🙏\n若方便改天前來，歡迎告知預計取貨日期，我為您安排 😊\n宅配照常服務，如有需要也可改宅配喔！"
+            return store_reply
     # 完全比對（不分大小寫）
     exact = EXACT_REPLIES.get(t) or EXACT_REPLIES.get(t.lower())
     if exact:
@@ -1504,6 +1509,8 @@ def _has_order_intent(text: str) -> bool:
     return bool(_ORDER_INTENT_RE.search(text))
 
 def _has_address_in_history(uid: str) -> bool:
+    if get_customer_profile(uid).get("address"):
+        return True
     history = get_history(uid)
     user_text = " ".join(m["content"] for m in history[-8:] if m["role"] == "user")
     return bool(_ADDRESS_RE.search(user_text))
