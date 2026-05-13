@@ -377,12 +377,13 @@ def _save_order_record(order_type: str, order_info: str, reply_text: str, uid: s
 
     if order_type == "order":
         record = {
-            "type": "宅配",
-            "name":    _full("name",    parts[0] if len(parts) > 0 else ""),
-            "phone":   _full("phone",   raw_phone),
-            "address": _full("address", parts[2] if len(parts) > 2 else ""),
-            "items":   parts[3] if len(parts) > 3 else "",
-            "time":    now_tw.strftime("%Y-%m-%d %H:%M"),
+            "type":        "宅配",
+            "name":        _full("name",    parts[0] if len(parts) > 0 else ""),
+            "phone":       _full("phone",   raw_phone),
+            "address":     _full("address", parts[2] if len(parts) > 2 else ""),
+            "items":       parts[3] if len(parts) > 3 else "",
+            "ship_date":   parts[4] if len(parts) > 4 else "",
+            "time":        now_tw.strftime("%Y-%m-%d %H:%M"),
         }
     else:
         record = {
@@ -977,8 +978,9 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
   ────────────────
   請於出貨前完成匯款，並在 LINE 回傳末四碼 📲
 
-  <<ORDER:姓名|電話|收件地址|品項簡述>>
-  例：<<ORDER:王小明|0912345678|台北市中正區忠孝東路1號|豆干絲30包>>
+  <<ORDER:姓名|電話|收件地址|品項簡述|出貨日期>>
+  例：<<ORDER:王小明|0912345678|台北市中正區忠孝東路1號|豆干絲30包|2026-05-22>>
+  出貨日期格式：YYYY-MM-DD，填入本次回覆告知客人的出貨日，若未確認填空白
 
 ▶ 門市自取訂單：當客戶提供以下三項資料（缺一不可），在回覆最後一行加上標記：
   付款方式：現場現金支付，不主動提及匯款選項
@@ -2393,14 +2395,23 @@ def orders_admin():
         if not keys:
             return records
         vals = _redis(["MGET"] + sorted(keys, reverse=True)) or []
-        for raw in vals:
+        for k, raw in zip(sorted(keys, reverse=True), vals):
             if not raw:
                 continue
             try:
-                records.append(json.loads(raw))
+                r = json.loads(raw)
+                r["_key"] = k
+                records.append(r)
             except Exception:
                 pass
         return records
+
+    if action == "delete":
+        del_key = request.args.get("key", "")
+        if del_key.startswith("order:"):
+            _redis(["DEL", del_key])
+        from flask import redirect
+        return redirect(f"/orders?token={token}&tab={tab}")
 
     if action == "export":
         import io, csv as _csv
@@ -2410,13 +2421,13 @@ def orders_admin():
         buf = io.StringIO()
         w = _csv.writer(buf)
         if tab == "delivery":
-            w.writerow(["下單時間", "姓名", "電話", "地址", "品項"])
+            w.writerow(["出貨日期", "下單時間", "姓名", "電話", "地址", "品項"])
             for r in rows:
-                w.writerow([r.get("time",""), r.get("name",""), r.get("phone",""), r.get("address",""), r.get("items","")])
+                w.writerow([r.get("ship_date",""), r.get("time",""), r.get("name",""), r.get("phone",""), r.get("address",""), r.get("items","")])
         else:
-            w.writerow(["下單時間", "姓名", "電話", "取貨時間", "品項"])
+            w.writerow(["取貨時間", "下單時間", "姓名", "電話", "品項"])
             for r in rows:
-                w.writerow([r.get("time",""), r.get("name",""), r.get("phone",""), r.get("pickup_time",""), r.get("items","")])
+                w.writerow([r.get("pickup_time",""), r.get("time",""), r.get("name",""), r.get("phone",""), r.get("items","")])
         return Response(
             "﻿" + buf.getvalue(),
             mimetype="text/csv; charset=utf-8",
@@ -2426,29 +2437,39 @@ def orders_admin():
     delivery_rows = _fetch_orders("order")
     pickup_rows   = _fetch_orders("pickup")
 
+    # 宅配按出貨日期升序（最早出貨排最上），店取按取貨時間升序（最早取貨排最上）
+    delivery_rows.sort(key=lambda r: r.get("ship_date", "") or r.get("time", ""))
+    pickup_rows.sort(key=lambda r: r.get("pickup_time", "") or r.get("time", ""))
+
     def _render_rows(rows, tab_type):
         if not rows:
-            return "<tr><td colspan='6' style='text-align:center;color:#aaa;padding:20px'>尚無資料</td></tr>"
+            return "<tr><td colspan='7' style='text-align:center;color:#aaa;padding:20px'>尚無資料</td></tr>"
         html = ""
         for r in rows:
+            key = r.get("_key", "")
+            del_url = f"/orders?token={token}&tab={tab_type}&action=delete&key={key}"
+            del_btn = f"<a href='{del_url}' onclick=\"return confirm('確定刪除此筆訂單？')\" style='padding:4px 10px;background:#c0392b;color:#fff;border-radius:6px;text-decoration:none;font-size:12px'>刪除</a>"
             if tab_type == "delivery":
                 html += (
                     f"<tr>"
+                    f"<td>{r.get('ship_date','—')}</td>"
                     f"<td>{r.get('time','')}</td>"
                     f"<td>{r.get('name','')}</td>"
                     f"<td>{r.get('phone','')}</td>"
                     f"<td style='font-size:11px'>{r.get('address','')}</td>"
                     f"<td style='font-size:11px'>{r.get('items','')}</td>"
+                    f"<td>{del_btn}</td>"
                     f"</tr>"
                 )
             else:
                 html += (
                     f"<tr>"
+                    f"<td>{r.get('pickup_time','')}</td>"
                     f"<td>{r.get('time','')}</td>"
                     f"<td>{r.get('name','')}</td>"
                     f"<td>{r.get('phone','')}</td>"
-                    f"<td>{r.get('pickup_time','')}</td>"
                     f"<td style='font-size:11px'>{r.get('items','')}</td>"
+                    f"<td>{del_btn}</td>"
                     f"</tr>"
                 )
         return html
@@ -2474,14 +2495,14 @@ tr:hover td{background:#fdf3e7}
     if tab == "delivery":
         active_rows = _render_rows(delivery_rows, "delivery")
         cnt = len(delivery_rows)
-        headers = "<tr><th>下單時間</th><th>姓名</th><th>電話</th><th>地址</th><th>品項</th></tr>"
+        headers = "<tr><th>出貨日期</th><th>下單時間</th><th>姓名</th><th>電話</th><th>地址</th><th>品項</th><th></th></tr>"
         export_url = f"/orders?token={token}&tab=delivery&action=export"
         tab_delivery = f"<a class='tab active' href='/orders?token={token}&tab=delivery'>🚚 宅配（{len(delivery_rows)}）</a>"
         tab_pickup   = f"<a class='tab' href='/orders?token={token}&tab=pickup'>🏪 店取（{len(pickup_rows)}）</a>"
     else:
         active_rows = _render_rows(pickup_rows, "pickup")
         cnt = len(pickup_rows)
-        headers = "<tr><th>下單時間</th><th>姓名</th><th>電話</th><th>取貨時間</th><th>品項</th></tr>"
+        headers = "<tr><th>取貨時間</th><th>下單時間</th><th>姓名</th><th>電話</th><th>品項</th><th></th></tr>"
         export_url = f"/orders?token={token}&tab=pickup&action=export"
         tab_delivery = f"<a class='tab' href='/orders?token={token}&tab=delivery'>🚚 宅配（{len(delivery_rows)}）</a>"
         tab_pickup   = f"<a class='tab active' href='/orders?token={token}&tab=pickup'>🏪 店取（{len(pickup_rows)}）</a>"
