@@ -300,25 +300,109 @@ def get_customer_profile(uid: str) -> dict:
             pass
     return {}
 
+# ── 電話標準化與 phone_profile 雙層查詢 ──────────────────────────────────
+_PHONE_STRIP_RE = re.compile(r'[\s\-\(\)\.]')
+
+def normalize_phone(phone: str) -> str:
+    """統一電話格式為 0 開頭 10 碼，移除空格/連字號/括號。"""
+    p = _PHONE_STRIP_RE.sub('', str(phone))
+    if p.startswith('+886'):
+        p = '0' + p[4:]
+    elif p.startswith('886'):
+        p = '0' + p[3:]
+    return p
+
+def get_phone_profile(phone: str) -> dict:
+    """以電話查詢歷史客戶資料（phone_profile:{normalized_phone}）。"""
+    if not UPSTASH_URL or not phone:
+        return {}
+    p = normalize_phone(phone)
+    raw = _redis(["GET", f"phone_profile:{p}"])
+    if raw:
+        try:
+            return json.loads(raw)
+        except Exception:
+            pass
+    return {}
+
+def save_phone_profile(phone: str, profile: dict):
+    """以電話為 key 儲存客戶資料（永久保存，無 TTL）。"""
+    p = normalize_phone(phone)
+    if p:
+        _redis(["SET", f"phone_profile:{p}", json.dumps(profile, ensure_ascii=False)])
+
+def _mask_name(name: str) -> str:
+    """姓名遮罩：保留第一個字，其餘以 * 代替。"""
+    if not name or len(name) < 2:
+        return name
+    return name[0] + '*' * (len(name) - 1)
+
+def _mask_phone(phone: str) -> str:
+    """電話遮罩：保留前4碼和後2碼，中間以 * 代替。"""
+    p = normalize_phone(phone)
+    if len(p) < 7:
+        return phone
+    return p[:4] + '*' * (len(p) - 6) + p[-2:]
+
+def _mask_address(address: str) -> str:
+    """地址遮罩：保留縣市區，路名以 **** 代替，門牌號保留。"""
+    if not address:
+        return address
+    import re as _re
+    m = _re.match(r'^(.{2,6}[縣市].{2,6}[區鄉鎮市])(.*?)(\d+.*)?$', address)
+    if m:
+        prefix = m.group(1)
+        suffix = m.group(3) or ''
+        return f"{prefix}****{suffix}"
+    return address[:4] + '****'
+
 def save_customer_profile(uid: str, profile: dict):
-    """儲存客人資料，TTL 一年。"""
+    """儲存客人資料，TTL 一年，同步更新 phone_profile。"""
     _redis(["SET", f"profile:{uid}", json.dumps(profile, ensure_ascii=False), "EX", 31536000])
+    if profile.get("phone"):
+        save_phone_profile(profile["phone"], profile)
 
 def customer_profile_text(uid: str) -> str:
-    """回傳客人資料提示，供每次呼叫 Claude 時動態注入。"""
+    """回傳客人資料提示，供每次呼叫 Claude 時動態注入。
+    優先查 profile:{uid}；找不到時從對話記憶抓電話查 phone_profile，找到後升級綁定。"""
     p = get_customer_profile(uid)
+
+    # 若 UID 無資料，嘗試從對話記憶中抓電話比對歷史資料
+    if not p:
+        history = get_history(uid)
+        all_text = " ".join(m["content"] for m in history[-10:])
+        phone_match = re.search(r'09\d{8}', all_text)
+        if phone_match:
+            p = get_phone_profile(phone_match.group())
+            if p:
+                save_customer_profile(uid, p)  # 升級綁定 UID
+
     if not p:
         return ""
+
+    # 遮罩處理
+    masked_name    = _mask_name(p.get("name", ""))
+    masked_phone   = _mask_phone(p.get("phone", ""))
+    masked_address = _mask_address(p.get("address", ""))
+
     lines = ["【回訪客人資料（系統自動帶入）】"]
-    if p.get("name"):
-        lines.append(f"姓名：{p['name']}")
-    if p.get("phone"):
-        lines.append(f"電話：{p['phone']}")
+    if masked_name:
+        lines.append(f"姓名：{masked_name}")
+    if masked_phone:
+        lines.append(f"電話：{masked_phone}")
+
     if p.get("address"):
-        lines.append(f"上次宅配地址：{p['address']}")
-        lines.append("→ 若客人選擇宅配，主動詢問「是否沿用上次的收件資料？」，客人確認後直接使用，不需重複收集。")
+        lines.append(f"上次宅配地址：{masked_address}")
+        lines.append(
+            "→ 若客人選擇宅配，主動詢問「請問這次收件資料與上次相同嗎？（收件人 / 地址 / 電話）」；"
+            "客人確認相同後直接沿用內部完整資料，不在對話中顯示完整地址；"
+            "客人說不同時，詢問哪個部分要更改，其餘沿用。"
+        )
     else:
-        lines.append("→ 此客人為門市自取回訪客人，姓名與電話已確認，絕對不可再詢問姓名或電話，直接沿用上方資料，門市自取只需再詢問預計取貨日期與時間即可成立訂單。")
+        lines.append(
+            "→ 此客人為門市自取回訪客人，姓名與電話已確認，絕對不可再詢問姓名或電話，"
+            "直接沿用上方資料，門市自取只需再詢問預計取貨日期與時間即可成立訂單。"
+        )
     return "\n".join(lines)
 
 def get_shipping_full_dates() -> set:
