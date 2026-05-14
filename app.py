@@ -2459,7 +2459,6 @@ def orders_admin():
                 html += (
                     f"<tr>"
                     f"<td>{r.get('ship_date','—')}</td>"
-                    f"<td>{r.get('time','')}</td>"
                     f"<td>{r.get('name','')}</td>"
                     f"<td>{r.get('phone','')}</td>"
                     f"<td style='font-size:11px'>{r.get('address','')}</td>"
@@ -2471,7 +2470,6 @@ def orders_admin():
                 html += (
                     f"<tr>"
                     f"<td>{r.get('pickup_time','')}</td>"
-                    f"<td>{r.get('time','')}</td>"
                     f"<td>{r.get('name','')}</td>"
                     f"<td>{r.get('phone','')}</td>"
                     f"<td style='font-size:11px'>{r.get('items','')}</td>"
@@ -2501,14 +2499,14 @@ tr:hover td{background:#fdf3e7}
     if tab == "delivery":
         active_rows = _render_rows(delivery_rows, "delivery")
         cnt = len(delivery_rows)
-        headers = "<tr><th>出貨日期</th><th>下單時間</th><th>姓名</th><th>電話</th><th>地址</th><th>品項</th><th></th></tr>"
+        headers = "<tr><th>出貨日期</th><th>姓名</th><th>電話</th><th>地址</th><th>品項</th><th></th></tr>"
         export_url = f"/orders?token={token}&tab=delivery&action=export"
         tab_delivery = f"<a class='tab active' href='/orders?token={token}&tab=delivery'>🚚 宅配（{len(delivery_rows)}）</a>"
         tab_pickup   = f"<a class='tab' href='/orders?token={token}&tab=pickup'>🏪 店取（{len(pickup_rows)}）</a>"
     else:
         active_rows = _render_rows(pickup_rows, "pickup")
         cnt = len(pickup_rows)
-        headers = "<tr><th>取貨時間</th><th>下單時間</th><th>姓名</th><th>電話</th><th>品項</th><th></th></tr>"
+        headers = "<tr><th>取貨時間</th><th>姓名</th><th>電話</th><th>品項</th><th></th></tr>"
         export_url = f"/orders?token={token}&tab=pickup&action=export"
         tab_delivery = f"<a class='tab' href='/orders?token={token}&tab=delivery'>🚚 宅配（{len(delivery_rows)}）</a>"
         tab_pickup   = f"<a class='tab active' href='/orders?token={token}&tab=pickup'>🏪 店取（{len(pickup_rows)}）</a>"
