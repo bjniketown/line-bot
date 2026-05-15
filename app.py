@@ -2045,18 +2045,23 @@ function render(){
   const now=new Date(),tk=toKey(now);
   document.getElementById('mt').textContent=vY+'年'+(vM+1)+'月';
   const sl=document.getElementById('sl');sl.innerHTML='';
+  const isCurrentMonth=(vY===now.getFullYear()&&vM===now.getMonth());
   const d=new Date(vY,vM,1);
+  let shown=0;
   while(d.getMonth()===vM){
     if(DEL.has(d.getDay())){
       const key=toKey(d),past=key<tk,today=key===tk,full=FD.has(key);
-      const cls=past?'ps':full?'fl':'av',stat=past?'已過':full?'🔴 排程滿檔':'✅ 可出貨';
+      if(isCurrentMonth&&past){d.setDate(d.getDate()+1);continue;}
+      if(isCurrentMonth&&shown>=9){d.setDate(d.getDate()+1);continue;}
+      const cls=full?'fl':'av',stat=full?'🔴 排程滿檔':'✅ 可出貨';
       const href='/store?token='+T+'&action='+(full?'shipping_open':'shipping_full')+'&date='+key;
       const ds=(vM+1)+'/'+(d.getDate()+'').padStart(2,'0');
       const row=document.createElement('div');
       row.className='srow '+cls+(today?' hi':'');
       row.innerHTML='<div class="sd"><span class="sd-m">'+ds+'</span><span class="sd-w">（'+WD[d.getDay()]+'）</span>'+(today?'<span class="td-p">今天</span>':'')+'</div>'
-        +'<div class="sr"><span class="ss">'+stat+'</span>'+(past?'':'<a class="sb" href="'+href+'">'+(full?'恢復出貨':'排程滿檔')+'</a>')+'</div>';
+        +'<div class="sr"><span class="ss">'+stat+'</span><a class="sb" href="'+href+'">'+(full?'恢復出貨':'排程滿檔')+'</a></div>';
       sl.appendChild(row);
+      shown++;
     }
     d.setDate(d.getDate()+1);
   }
