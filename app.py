@@ -591,6 +591,7 @@ SYSTEM_TEXT = """你是「老鄰居豆干絲」的 LINE 客服助理，請用繁
 2. 出現「小計」欄位
 
 直接呈現：品項清單（含數量）→ 一句運費說明 → 總金額，不得有任何中間計算過程。
+【絕對禁止】在說明文字中出現最終總金額數字（例：「總金額為 5,860 元」「所以是 5,860 元」），總金額只能出現在最後一行 **總金額：X,XXX 元**，違反視為嚴重錯誤。
 
 ❌ 禁用格式（以下兩種都不可以）：
 ・招牌豆干絲 20 包 × 70 元 = 1,400 元
@@ -1213,8 +1214,11 @@ def _calc_shipping(total_units: int) -> int:
 
 def _replace_total(text: str, total: int) -> str:
     """移除所有舊總金額行（不論格式），統一在最後附加一行正確金額。"""
-    cleaned = re.sub(r'\n?\*{0,2}(?:總金額|總計|金額合計)[：:][^\n]*', '', text).rstrip()
-    return cleaned + f"\n\n**總金額：{total:,} 元**"
+    # 清掉獨立行格式：**總金額：X,XXX 元**
+    cleaned = re.sub(r'\n?\*{0,2}(?:總金額|總計|金額合計)[：:][^\n]*', '', text)
+    # 清掉句子嵌入格式：總金額為 **X,XXX 元** / 總金額為 X,XXX 元
+    cleaned = re.sub(r'，?總金額為\s*\*{0,2}[\d,]+\s*元\*{0,2}', '', cleaned)
+    return cleaned.rstrip() + f"\n\n**總金額：{total:,} 元**"
 
 def inject_correct_total(text: str, order_type: str = None) -> str:
     """優先用 <<CALC>> 標籤計算；無標籤時退回 regex 解析。"""
