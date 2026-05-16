@@ -330,10 +330,20 @@ def get_phone_profile(phone: str) -> dict:
     return {}
 
 def save_phone_profile(phone: str, profile: dict):
-    """以電話為 key 儲存客戶資料（永久保存，無 TTL）。"""
+    """以電話為 key 儲存客戶資料（永久保存，無 TTL）。只更新有值的欄位，保留舊資料。"""
     p = normalize_phone(phone)
-    if p:
-        _redis(["SET", f"phone_profile:{p}", json.dumps(profile, ensure_ascii=False)])
+    if not p:
+        return
+    existing = get_phone_profile(phone) or {}
+    merged = dict(existing)
+    for k, v in profile.items():
+        if not v:
+            continue
+        # 名字保留較長的（宅配全名不被門市姓氏蓋掉）
+        if k == "name" and len(existing.get("name", "")) > len(v):
+            continue
+        merged[k] = v
+    _redis(["SET", f"phone_profile:{p}", json.dumps(merged, ensure_ascii=False)])
 
 def _mask_name(name: str) -> str:
     """姓名遮罩：保留第一個字，其餘以 * 代替。"""
@@ -440,19 +450,30 @@ def customer_profile_text(uid: str, current_msg: str = "") -> str:
     if masked_phone:
         lines.append(f"電話：{masked_phone}")
 
-    if p.get("address"):
+    # 判斷對話中是否提到宅配意圖
+    history = get_history(uid)
+    recent_text = " ".join(m["content"] for m in history[-6:]) + " " + current_msg
+    is_delivery = any(kw in recent_text for kw in ("宅配", "寄送", "寄過來", "郵寄", "收件", "運費"))
+    is_pickup   = any(kw in recent_text for kw in ("門市", "自取", "取貨", "來拿", "來取"))
+
+    if p.get("address") and is_delivery and not is_pickup:
         lines.append(f"上次宅配地址：{masked_address}")
         lines.append(
-            f"→ 若客人選擇宅配，主動詢問「請問這次收件資料與上次相同嗎？"
+            f"→ 客人選擇宅配，主動詢問「請問這次收件資料與上次相同嗎？"
             f"（收件人：{masked_name} / 電話：{masked_phone} / 地址：{masked_address}）」；"
             "客人確認相同後直接沿用內部完整資料，不在對話中顯示完整地址；"
             "客人說不同時，詢問哪個部分要更改，其餘沿用。"
         )
-    else:
+    elif is_pickup and not is_delivery:
         lines.append(
             f"→ 此客人為門市自取回訪客人，姓名（{masked_name}）與電話（{masked_phone}）已確認，"
             "絕對不可再詢問姓名或電話，"
             f"主動告知「您好 {masked_name}！請問這次預計什麼時候來取貨呢？」直接進入取貨時間確認。"
+        )
+    else:
+        lines.append(
+            f"→ 此客人為回訪客人，姓名（{masked_name}）與電話（{masked_phone}）已確認，不可再詢問。"
+            "待客人確認宅配或自取後，再詢問對應所需資料。"
         )
     return "\n".join(lines)
 
@@ -1894,6 +1915,11 @@ def ask(uid, msg):
                 "name": parts[0].strip(),
                 "phone": parts[1].strip(),
                 "address": parts[2].strip(),
+            })
+        elif order_type == "pickup" and len(parts) >= 2:
+            save_customer_profile(uid, {
+                "name": parts[0].strip(),
+                "phone": parts[1].strip(),
             })
         _save_order_record(order_type, order_info, clean, uid)
 
