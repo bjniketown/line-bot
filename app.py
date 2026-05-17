@@ -2180,6 +2180,42 @@ def store_admin():
     elif action == "busy_season_clear":
         clear_busy_season()
         return _redirect(token)
+    elif action == "inject_memory":
+        from flask import redirect
+        phone_q = request.args.get("phone", "").strip()
+        msg_q   = request.args.get("msg", "").strip()
+        result  = ""
+        if phone_q and msg_q:
+            p = normalize_phone(phone_q)
+            profile = get_phone_profile(p) if p else {}
+            uid_q = profile.get("uid", "") if profile else ""
+            # 也從 profile:{uid} 反查：掃 KEYS 找電話對應的 UID
+            if not uid_q:
+                keys = _redis(["KEYS", "profile:*"]) or []
+                for k in keys:
+                    raw = _redis(["GET", k])
+                    if raw:
+                        try:
+                            d = json.loads(raw)
+                            if normalize_phone(d.get("phone","")) == p:
+                                uid_q = k.replace("profile:", "")
+                                break
+                        except Exception:
+                            pass
+            if uid_q:
+                history = get_history(uid_q)
+                history.append(_msg_with_time("assistant", msg_q))
+                set_history(uid_q, history[-10:])
+                result = "ok"
+            else:
+                result = "notfound"
+        name_q = ""
+        if result == "ok":
+            prof = get_phone_profile(normalize_phone(phone_q))
+            name_q = prof.get("name", "") if prof else ""
+        from flask import redirect
+        params = f"&inject_result={result}&inject_phone={phone_q}&inject_name={name_q}"
+        return redirect(f"/store?token={token}{params}")
 
     store_msg  = store_status_text()
     dump_msg   = dumpling_soldout_text()
@@ -2229,6 +2265,24 @@ def store_admin():
         f"<a href='/orders?token={token}' style='flex:1;padding:12px;background:#5c3d1e;color:#fff;border-radius:10px;text-align:center;text-decoration:none;font-size:14px'>📋 訂單紀錄</a>"
         f"<a href='/customers?token={token}' style='flex:1;padding:12px;background:#8b5e3c;color:#fff;border-radius:10px;text-align:center;text-decoration:none;font-size:14px'>👥 客戶資料</a>"
         "</div>"
+
+        # ── 注入對話記憶 ──────────────────────────────────────────────
+        "<div class='sec-t'>注入怪人記憶</div>"
+        "<div class='card'>"
+        "<div class='card-bd'>"
+        "<p style='font-size:12px;color:#888;margin-bottom:10px'>人工介入後，填入電話與訊息，讓怪人知道你說了什麼</p>"
+        f"<form method='get' action='/store'>"
+        f"<input type='hidden' name='token' value='{token}'>"
+        f"<input type='hidden' name='action' value='inject_memory'>"
+        "<div style='display:flex;flex-direction:column;gap:8px'>"
+        "<input type='tel' name='phone' placeholder='客人電話（如 0912345678）' style='padding:8px 10px;border:1px solid #c9a96e;border-radius:8px;font-size:14px;width:100%'>"
+        "<textarea name='msg' placeholder='要讓怪人記住的內容（例：您的訂單已改為 5/20 12:00 取貨）' rows='3' style='padding:8px 10px;border:1px solid #c9a96e;border-radius:8px;font-size:14px;width:100%;resize:vertical'></textarea>"
+        "<button type='submit' style='padding:10px;background:#5c3d1e;color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer'>寫入記憶</button>"
+        "</div>"
+        "</form>"
+        + (f"<p style='margin-top:10px;color:#4caf50;font-size:13px'>✅ 已成功寫入 {request.args.get('inject_name','') or request.args.get('inject_phone','')} 的對話記憶</p>" if request.args.get('inject_result') == 'ok' else "")
+        + (f"<p style='margin-top:10px;color:#c0392b;font-size:13px'>❌ 找不到此電話的客戶資料，請確認電話號碼</p>" if request.args.get('inject_result') == 'notfound' else "")
+        + "</div></div>"
 
         # ── 門市接單 ──────────────────────────────────────────────────
         "<div class='sec-t'>門市接單</div>"
