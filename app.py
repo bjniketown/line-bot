@@ -2557,11 +2557,14 @@ def customers_admin():
         address2 = addrs[1] if len(addrs) > 1 else ""
         notes   = p.get("notes", "") or ""
         updated = (p.get("updated_at", "") or "")[:10]
+        line_uid = p.get("line_uid", "") or ""
+        uid_display = f"<span style='color:#4caf50;font-size:10px'>✔ 已綁定</span>" if line_uid else "<span style='color:#ccc;font-size:10px'>未綁定</span>"
         rows_html += f"""
 <tr>
   <td>{name}</td>
   <td>{phone}</td>
   <td style='font-size:12px'>{address}{"<br><span style='color:#aaa'>"+address2+"</span>" if address2 else ""}</td>
+  <td style='font-size:11px;text-align:center'>{uid_display}</td>
   <td style='font-size:12px'>
     <form method='post' action='/customers?token={token}' style='display:flex;gap:4px;align-items:center'>
       <input type='hidden' name='phone' value='{phone}'>
@@ -2606,7 +2609,7 @@ tr:last-child td{border-bottom:none}tr:hover td{background:#fdf3e7}
         f"<span class='cnt'>顯示 {total} 筆</span>"
         f"</div>"
         f"<table>"
-        f"<thead><tr><th>姓名</th><th>電話</th><th>地址</th><th>備註</th><th>更新</th></tr></thead>"
+        f"<thead><tr><th>姓名</th><th>電話</th><th>地址</th><th>LINE</th><th>備註</th><th>更新</th></tr></thead>"
         f"<tbody>{rows_html}</tbody>"
         f"</table>"
         f"</body></html>"
