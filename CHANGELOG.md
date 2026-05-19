@@ -31,6 +31,26 @@
 
 ---
 
+## 2026-05-19（CRM 建立 + 機器人修正）
+
+### CRM 系統建立
+- **Supabase 整合**：新增 customers、addresses、orders 三張表，取代 Redis phone_profile
+- **雙表設計**：customers（主檔）+ addresses（收件地址），一個客人可儲存多個地址
+- **1,226 筆客戶資料**從本地 CSV 整理上傳，含地址合併（縣市＋區＋街道）、去重複、備註保留
+- **後台 /customers 更新**：改從 Supabase 讀取，顯示地址1/地址2，備註可直接編輯
+- **機器人同步**：新訂單成立時自動寫入 Supabase customers + addresses，Redis 保留為快取
+
+### 機器人規則修正
+- **fix: _TIME_WARNING_KEYWORDS 新增「還沒開門」等詞語**（commit 3bdca30）：避免合法時間被誤判為未開門
+- **fix: Rule 12 補充含明確小時數直接判定**（commit fa6689c、61faa70）：「下午5點」「下午5點30」等明確時間直接確認，不再多問一輪
+- **fix: _replace_total() 擴充**：新增 regex 捕捉「總金額為 X 元」格式，防止金額重複顯示
+
+### 環境變數新增（Render）
+- `SUPABASE_URL`：`https://mnazxeogpkwwhuassruu.supabase.co`
+- `SUPABASE_KEY`：publishable key（anon）
+
+---
+
 ## 使用說明
 
 每次對話結束前，請告訴 Claude「把今天的重要決定存起來」，Claude 會：
