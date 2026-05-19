@@ -81,6 +81,10 @@ def _msg_with_time(role: str, content: str) -> dict:
     ts = datetime.now(_TZ_TW).strftime("%Y-%m-%d %H:%M")
     return {"role": role, "content": content, "time": ts}
 
+def _msg_with_time(role: str, content: str) -> dict:
+    ts = datetime.now(_TZ_TW).strftime("%Y-%m-%d %H:%M")
+    return {"role": role, "content": content, "time": ts}
+
 
 def _fetch_qr_code_url():
     """啟動時從 LINE API 取得官方帳號 QR code 網址"""
@@ -1304,7 +1308,7 @@ def inject_correct_total(text: str, order_type: str = None) -> str:
 # ── Python-side 取貨時間驗證（Claude 的時間判斷不可靠，由 Python 確認）────
 _PICKUP_DT_RE = re.compile(r'(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})')
 _WEEKDAY_ZH   = ['週一', '週二', '週三', '週四', '週五', '週六', '週日']
-_TIME_WARNING_KEYWORDS = ('打烊', '關門', '快關', '時間緊', '來不及', '即將', '建議改約', '建議您改約', '請改約', '恐怕')
+_TIME_WARNING_KEYWORDS = ('打烊', '關門', '快關', '時間緊', '來不及', '即將', '建議改約', '建議您改約', '請改約', '恐怕', '還沒開門', '尚未開門', '未開門', '還未開')
 
 def validate_pickup_time(order_info: str) -> tuple[bool, str]:
     """驗證 <<PICKUP>> 中的 YYYY-MM-DD HH:MM 是否在營業時段。
