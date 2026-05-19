@@ -379,7 +379,7 @@ def _supa_get_addresses(phone: str) -> list:
         return []
 
 def get_phone_profile(phone: str) -> dict:
-    """以電話查詢客戶資料，優先從 Supabase 查，fallback 到 Redis。"""
+    """以電話查詢客戶資料，從 Supabase 查詢。"""
     if not phone:
         return {}
     p = normalize_phone(phone)
@@ -390,13 +390,6 @@ def get_phone_profile(phone: str) -> dict:
         address2 = addrs[1].get("address", "") if len(addrs) > 1 else ""
         return {"name": row.get("name", ""), "address": address, "address2": address2,
                 "phone": p, "line_uid": row.get("line_uid", ""), "notes": row.get("notes", "")}
-    # Fallback：Redis
-    raw = _redis(["GET", f"phone_profile:{p}"])
-    if raw:
-        try:
-            return json.loads(raw)
-        except Exception:
-            pass
     return {}
 
 def save_phone_profile(phone: str, profile: dict):
@@ -429,8 +422,6 @@ def save_phone_profile(phone: str, profile: dict):
                 "phone": p, "address": new_addr,
                 "label": "預設", "is_default": not bool(existing_addrs),
             })
-    # 同步寫 Redis 快取
-    _redis(["SET", f"phone_profile:{p}", json.dumps(merged, ensure_ascii=False)])
 
 def _mask_name(name: str) -> str:
     """姓名遮罩：保留第一個字，其餘以 * 代替。"""
