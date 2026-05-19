@@ -12,7 +12,50 @@ OWNER_LINE_UID  = os.environ.get("OWNER_LINE_UID", "")  # 僅用於豁免每日�
 UPSTASH_URL     = os.environ.get("UPSTASH_URL", "")     # Upstash Redis REST 網址
 UPSTASH_TOKEN   = os.environ.get("UPSTASH_TOKEN", "")   # Upstash Redis token
 ADMIN_TOKEN     = os.environ.get("ADMIN_TOKEN", "")      # 門市管理端點驗證 token
+SUPABASE_URL    = os.environ.get("SUPABASE_URL", "")     # Supabase project URL
+SUPABASE_KEY    = os.environ.get("SUPABASE_KEY", "")     # Supabase anon/publishable key
 claude = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_KEY"])
+
+
+# ── Supabase REST helpers ────────────────────────────────────────────────────
+def _supa_get(table: str, filters: dict) -> dict | None:
+    """查詢 Supabase 單筆資料，回傳第一筆 dict 或 None。"""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return None
+    try:
+        params = {f"{k}": f"eq.{v}" for k, v in filters.items()}
+        params["limit"] = "1"
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/{table}",
+            headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+            params=params,
+            timeout=5,
+        )
+        if r.ok:
+            data = r.json()
+            return data[0] if data else None
+    except Exception:
+        pass
+    return None
+
+def _supa_upsert(table: str, record: dict):
+    """新增或更新 Supabase 資料（以 phone 為主鍵 upsert）。"""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return
+    try:
+        requests.post(
+            f"{SUPABASE_URL}/rest/v1/{table}",
+            headers={
+                "apikey": SUPABASE_KEY,
+                "Authorization": f"Bearer {SUPABASE_KEY}",
+                "Content-Type": "application/json",
+                "Prefer": "resolution=merge-duplicates",
+            },
+            json=record,
+            timeout=5,
+        )
+    except Exception:
+        pass
 
 
 # ── Upstash Redis 對話記憶（跨重啟持久化）────────────────────────────────
@@ -321,10 +364,16 @@ def normalize_phone(phone: str) -> str:
     return p
 
 def get_phone_profile(phone: str) -> dict:
-    """以電話查詢歷史客戶資料（phone_profile:{normalized_phone}）。"""
-    if not UPSTASH_URL or not phone:
+    """以電話查詢客戶資料，優先從 Supabase 查，fallback 到 Redis。"""
+    if not phone:
         return {}
     p = normalize_phone(phone)
+    # 優先查 Supabase
+    row = _supa_get("customers", {"phone": p})
+    if row:
+        return {"name": row.get("name", ""), "address": row.get("address", ""),
+                "phone": p, "line_uid": row.get("line_uid", ""), "notes": row.get("notes", "")}
+    # Fallback：Redis
     raw = _redis(["GET", f"phone_profile:{p}"])
     if raw:
         try:
@@ -334,7 +383,7 @@ def get_phone_profile(phone: str) -> dict:
     return {}
 
 def save_phone_profile(phone: str, profile: dict):
-    """以電話為 key 儲存客戶資料（永久保存，無 TTL）。只更新有值的欄位，保留舊資料。"""
+    """以電話為 key 儲存客戶資料，同步寫入 Supabase 與 Redis。只更新有值的欄位，保留舊資料。"""
     p = normalize_phone(phone)
     if not p:
         return
@@ -343,10 +392,19 @@ def save_phone_profile(phone: str, profile: dict):
     for k, v in profile.items():
         if not v:
             continue
-        # 名字保留較長的（宅配全名不被門市姓氏蓋掉）
         if k == "name" and len(existing.get("name", "")) > len(v):
             continue
         merged[k] = v
+    # 寫入 Supabase
+    supa_record = {
+        "phone": p,
+        "name": merged.get("name", ""),
+        "address": merged.get("address", ""),
+        "line_uid": merged.get("line_uid", ""),
+        "updated_at": datetime.now(_TZ_TW).isoformat(),
+    }
+    _supa_upsert("customers", supa_record)
+    # 同步寫 Redis（保留快取，避免 Supabase 暫時失效）
     _redis(["SET", f"phone_profile:{p}", json.dumps(merged, ensure_ascii=False)])
 
 def _mask_name(name: str) -> str:
