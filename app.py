@@ -1646,10 +1646,25 @@ def verify(body, sig):
     return hmac.compare_digest(base64.b64encode(h).decode(), sig)
 
 
+def _add_quick_reply_if_needed(messages: list) -> list:
+    """若最後一則訊息同時提到自取與宅配，自動附上快速回覆按鈕。"""
+    if not messages or messages[-1].get("type") != "text":
+        return messages
+    text = messages[-1].get("text", "")
+    if ("自取" in text or "取貨" in text) and ("宅配" in text or "寄送" in text):
+        messages[-1]["quickReply"] = {
+            "items": [
+                {"type": "action", "action": {"type": "message", "label": "🏪 門市自取", "text": "門市自取"}},
+                {"type": "action", "action": {"type": "message", "label": "🚚 宅配到府", "text": "宅配到府"}},
+            ]
+        }
+    return messages
+
 def reply(token, messages):
     """messages 可以是文字字串，或 LINE message 物件的 list"""
     if isinstance(messages, str):
         messages = [{"type": "text", "text": messages}]
+    messages = _add_quick_reply_if_needed(messages)
     try:
         r = requests.post(
             "https://api.line.me/v2/bot/message/reply",
