@@ -2453,13 +2453,39 @@ def customers_admin():
         try:
             params = {"order": "updated_at.desc", "limit": "500"}
             if q:
-                params["or"] = f"(name.ilike.*{q}*,phone.ilike.*{q}*,address.ilike.*{q}*)"
+                params["or"] = f"(name.ilike.*{q}*,phone.ilike.*{q}*)"
             r = requests.get(
                 f"{SUPABASE_URL}/rest/v1/customers",
                 headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
                 params=params, timeout=5,
             )
-            return r.json() if r.ok else []
+            rows = r.json() if r.ok else []
+            # 若關鍵字可能是地址，補查 addresses 表
+            if q and SUPABASE_URL:
+                try:
+                    ra = requests.get(
+                        f"{SUPABASE_URL}/rest/v1/addresses",
+                        headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+                        params={"address": f"ilike.*{q}*", "select": "phone"},
+                        timeout=5,
+                    )
+                    if ra.ok:
+                        extra_phones = list({a["phone"] for a in ra.json() if a.get("phone")})
+                        existing_phones = {c["phone"] for c in rows}
+                        missing = [p for p in extra_phones if p not in existing_phones]
+                        if missing:
+                            phones_str = ",".join(f'"{p}"' for p in missing)
+                            rc = requests.get(
+                                f"{SUPABASE_URL}/rest/v1/customers",
+                                headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+                                params={"phone": f"in.({phones_str})"},
+                                timeout=5,
+                            )
+                            if rc.ok:
+                                rows += rc.json()
+                except Exception:
+                    pass
+            return rows
         except Exception:
             return []
 
@@ -2471,9 +2497,30 @@ def customers_admin():
         rows = _fetch_from_supabase()
         buf = io.StringIO()
         w = _csv.writer(buf)
-        w.writerow(["姓名", "電話", "地址", "備註", "更新時間"])
+        # 批次撈地址
+        export_addr_map = {}
+        if rows and SUPABASE_URL:
+            try:
+                phones_str = ",".join(f'"{c["phone"]}"' for c in rows if c.get("phone"))
+                ra = requests.get(
+                    f"{SUPABASE_URL}/rest/v1/addresses",
+                    headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+                    params={"phone": f"in.({phones_str})", "order": "is_default.desc", "limit": "2000"},
+                    timeout=5,
+                )
+                if ra.ok:
+                    for a in ra.json():
+                        ph = a.get("phone", "")
+                        if ph not in export_addr_map:
+                            export_addr_map[ph] = []
+                        export_addr_map[ph].append(a.get("address", ""))
+            except Exception:
+                pass
+        w.writerow(["姓名", "電話", "地址1", "地址2", "備註", "更新時間"])
         for p in rows:
-            w.writerow([p.get("name",""), p.get("phone",""), p.get("address",""),
+            addrs = export_addr_map.get(p.get("phone",""), [])
+            w.writerow([p.get("name",""), p.get("phone",""),
+                        addrs[0] if addrs else "", addrs[1] if len(addrs) > 1 else "",
                         p.get("notes",""), p.get("updated_at","")])
         return Response("﻿" + buf.getvalue(), mimetype="text/csv; charset=utf-8",
                         headers={"Content-Disposition": "attachment; filename=customers.csv"})
