@@ -2409,116 +2409,122 @@ def store_admin():
     )
 
 
-@app.route("/customers")
+@app.route("/customers", methods=["GET", "POST"])
 def customers_admin():
     token = request.args.get("token", "")
     if not ADMIN_TOKEN or token != ADMIN_TOKEN:
         abort(403)
 
-    def _fetch_all_profiles():
-        keys = _redis(["KEYS", "phone_profile:*"]) or []
-        if not keys:
+    from flask import Response
+
+    # 更新備註
+    if request.method == "POST":
+        phone = request.form.get("phone", "").strip()
+        notes = request.form.get("notes", "").strip()
+        if phone and SUPABASE_URL:
+            requests.patch(
+                f"{SUPABASE_URL}/rest/v1/customers?phone=eq.{phone}",
+                headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
+                         "Content-Type": "application/json"},
+                json={"notes": notes}, timeout=5,
+            )
+        from flask import redirect
+        return redirect(f"/customers?token={token}&q={request.form.get('q','')}")
+
+    def _fetch_from_supabase(q=""):
+        if not SUPABASE_URL:
             return []
-        profiles = []
-        batch = 100
-        for i in range(0, len(keys), batch):
-            chunk = keys[i:i+batch]
-            vals = _redis(["MGET"] + chunk) or []
-            for raw in vals:
-                if not raw:
-                    continue
-                try:
-                    profiles.append(json.loads(raw))
-                except Exception:
-                    pass
-        return profiles
+        try:
+            params = {"order": "updated_at.desc", "limit": "500"}
+            if q:
+                params["or"] = f"(name.ilike.*{q}*,phone.ilike.*{q}*,address.ilike.*{q}*)"
+            r = requests.get(
+                f"{SUPABASE_URL}/rest/v1/customers",
+                headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+                params=params, timeout=5,
+            )
+            return r.json() if r.ok else []
+        except Exception:
+            return []
 
     action = request.args.get("action", "")
+    q = request.args.get("q", "").strip()
+
     if action == "export":
         import io, csv as _csv
-        from flask import Response
-        rows = []
-        for p in _fetch_all_profiles():
-            rows.append([
-                p.get("name", ""),
-                p.get("phone", ""),
-                p.get("address", ""),
-                p.get("source", ""),
-            ])
+        rows = _fetch_from_supabase()
         buf = io.StringIO()
         w = _csv.writer(buf)
-        w.writerow(["姓名", "電話", "地址", "來源"])
-        w.writerows(rows)
-        return Response(
-            "﻿" + buf.getvalue(),
-            mimetype="text/csv; charset=utf-8",
-            headers={"Content-Disposition": "attachment; filename=customers.csv"},
-        )
+        w.writerow(["姓名", "電話", "地址", "備註", "更新時間"])
+        for p in rows:
+            w.writerow([p.get("name",""), p.get("phone",""), p.get("address",""),
+                        p.get("notes",""), p.get("updated_at","")])
+        return Response("﻿" + buf.getvalue(), mimetype="text/csv; charset=utf-8",
+                        headers={"Content-Disposition": "attachment; filename=customers.csv"})
 
-    # 搜尋
-    q = request.args.get("q", "").strip()
-    customers = []
-    for p in _fetch_all_profiles():
-        if q and q not in p.get("name", "") and q not in p.get("phone", "") and q not in p.get("address", ""):
-            continue
-        customers.append(p)
+    customers = _fetch_from_supabase(q)
+    total = len(customers)
 
     rows_html = ""
     for p in customers:
-        name    = p.get("name", "")
-        phone   = p.get("phone", "")
-        address = p.get("address", "（無）")
-        source  = p.get("source", "")
-        rows_html += (
-            f"<tr>"
-            f"<td>{name}</td>"
-            f"<td>{phone}</td>"
-            f"<td style='font-size:12px'>{address}</td>"
-            f"<td style='font-size:11px;color:#999'>{source}</td>"
-            f"</tr>"
-        )
+        name    = p.get("name", "") or ""
+        phone   = p.get("phone", "") or ""
+        address = p.get("address", "") or "（無）"
+        notes   = p.get("notes", "") or ""
+        updated = (p.get("updated_at", "") or "")[:10]
+        rows_html += f"""
+<tr>
+  <td>{name}</td>
+  <td>{phone}</td>
+  <td style='font-size:12px'>{address}</td>
+  <td style='font-size:12px'>
+    <form method='post' action='/customers?token={token}' style='display:flex;gap:4px;align-items:center'>
+      <input type='hidden' name='phone' value='{phone}'>
+      <input type='hidden' name='q' value='{q}'>
+      <input type='text' name='notes' value='{notes}' placeholder='備註' style='width:130px;padding:4px 6px;border:1px solid #c9a96e;border-radius:6px;font-size:12px'>
+      <button type='submit' style='padding:4px 8px;background:#5c3d1e;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:11px'>儲存</button>
+    </form>
+  </td>
+  <td style='font-size:11px;color:#999'>{updated}</td>
+</tr>"""
 
-    total = len(customers)
-    css = """
-<style>
+    css = """<style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Noto Sans TC',sans-serif;background:#fdf8f2;color:#3b2a1a;padding:16px}
 h1{font-size:18px;margin-bottom:12px;color:#5c3d1e}
 .toolbar{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;align-items:center}
 input[type=text]{padding:8px 12px;border:1.5px solid #c9a96e;border-radius:8px;font-size:14px;background:#fffdf8;width:220px}
 .btn{padding:8px 16px;border-radius:8px;border:none;cursor:pointer;font-size:13px;text-decoration:none;display:inline-block}
-.btn-g{background:#4caf50;color:#fff}
-.btn-b{background:#2196f3;color:#fff}
+.btn-g{background:#4caf50;color:#fff}.btn-b{background:#2196f3;color:#fff}
 .cnt{font-size:13px;color:#888;margin-left:auto}
 table{width:100%;border-collapse:collapse;background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.08)}
 th{background:#5c3d1e;color:#fff;padding:10px 12px;font-size:13px;text-align:left}
-td{padding:9px 12px;border-bottom:1px solid #f0e8da;font-size:13px}
-tr:last-child td{border-bottom:none}
-tr:hover td{background:#fdf3e7}
-</style>
-"""
+td{padding:9px 12px;border-bottom:1px solid #f0e8da;font-size:13px;vertical-align:middle}
+tr:last-child td{border-bottom:none}tr:hover td{background:#fdf3e7}
+</style>"""
+
     return (
-        "<!DOCTYPE html><html lang='zh-Hant'><head>"
-        "<meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
-        "<meta name='referrer' content='no-referrer'>"
+        f"<!DOCTYPE html><html lang='zh-Hant'><head>"
+        f"<meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+        f"<meta name='referrer' content='no-referrer'>"
         f"<title>老鄰居 · 客戶資料</title>{css}"
-        "</head><body>"
+        f"</head><body>"
         f"<a href='/store?token={token}' style='display:inline-block;margin-bottom:12px;padding:7px 14px;background:#5c3d1e;color:#fff;border-radius:8px;text-decoration:none;font-size:13px'>← 回首頁</a>"
-        "<h1>老鄰居豆干絲 · 客戶資料庫</h1>"
-        "<div class='toolbar'>"
+        f"<h1>老鄰居豆干絲 · 客戶資料庫</h1>"
+        f"<div class='toolbar'>"
         f"<form method='get' action='/customers' style='display:flex;gap:8px;align-items:center'>"
         f"<input type='hidden' name='token' value='{token}'>"
         f"<input type='text' name='q' placeholder='搜尋姓名 / 電話 / 地址' value='{q}'>"
-        "<button class='btn btn-b' type='submit'>搜尋</button>"
-        "</form>"
+        f"<button class='btn btn-b' type='submit'>搜尋</button>"
+        f"</form>"
         f"<a class='btn btn-g' href='/customers?token={token}&action=export'>匯出 CSV</a>"
-        f"<span class='cnt'>共 {total} 筆</span>"
-        "</div>"
-        "<table>"
-        "<thead><tr><th>姓名</th><th>電話</th><th>地址</th><th>來源</th></tr></thead>"
+        f"<span class='cnt'>顯示 {total} 筆</span>"
+        f"</div>"
+        f"<table>"
+        f"<thead><tr><th>姓名</th><th>電話</th><th>地址</th><th>備註</th><th>更新</th></tr></thead>"
         f"<tbody>{rows_html}</tbody>"
-        "</table>"
-        "</body></html>"
+        f"</table>"
+        f"</body></html>"
     )
 
 
