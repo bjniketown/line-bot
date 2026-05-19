@@ -363,15 +363,32 @@ def normalize_phone(phone: str) -> str:
         p = '0' + p[3:]
     return p
 
+def _supa_get_addresses(phone: str) -> list:
+    """查詢客人的所有收件地址，回傳 list of dict。"""
+    if not SUPABASE_URL or not phone:
+        return []
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/addresses",
+            headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+            params={"phone": f"eq.{phone}", "order": "is_default.desc"},
+            timeout=5,
+        )
+        return r.json() if r.ok else []
+    except Exception:
+        return []
+
 def get_phone_profile(phone: str) -> dict:
     """以電話查詢客戶資料，優先從 Supabase 查，fallback 到 Redis。"""
     if not phone:
         return {}
     p = normalize_phone(phone)
-    # 優先查 Supabase
     row = _supa_get("customers", {"phone": p})
     if row:
-        return {"name": row.get("name", ""), "address": row.get("address", ""),
+        addrs = _supa_get_addresses(p)
+        address = addrs[0].get("address", "") if addrs else ""
+        address2 = addrs[1].get("address", "") if len(addrs) > 1 else ""
+        return {"name": row.get("name", ""), "address": address, "address2": address2,
                 "phone": p, "line_uid": row.get("line_uid", ""), "notes": row.get("notes", "")}
     # Fallback：Redis
     raw = _redis(["GET", f"phone_profile:{p}"])
@@ -383,7 +400,7 @@ def get_phone_profile(phone: str) -> dict:
     return {}
 
 def save_phone_profile(phone: str, profile: dict):
-    """以電話為 key 儲存客戶資料，同步寫入 Supabase 與 Redis。只更新有值的欄位，保留舊資料。"""
+    """以電話為 key 儲存客戶資料，同步寫入 Supabase customers + addresses，並寫 Redis 快取。"""
     p = normalize_phone(phone)
     if not p:
         return
@@ -395,16 +412,24 @@ def save_phone_profile(phone: str, profile: dict):
         if k == "name" and len(existing.get("name", "")) > len(v):
             continue
         merged[k] = v
-    # 寫入 Supabase
-    supa_record = {
+    # 寫入 customers
+    _supa_upsert("customers", {
         "phone": p,
         "name": merged.get("name", ""),
-        "address": merged.get("address", ""),
+        "notes": merged.get("notes", ""),
         "line_uid": merged.get("line_uid", ""),
         "updated_at": datetime.now(_TZ_TW).isoformat(),
-    }
-    _supa_upsert("customers", supa_record)
-    # 同步寫 Redis（保留快取，避免 Supabase 暫時失效）
+    })
+    # 有新地址時寫入 addresses（避免重複）
+    new_addr = merged.get("address", "")
+    if new_addr:
+        existing_addrs = [a.get("address", "") for a in _supa_get_addresses(p)]
+        if new_addr not in existing_addrs:
+            _supa_upsert("addresses", {
+                "phone": p, "address": new_addr,
+                "label": "預設", "is_default": not bool(existing_addrs),
+            })
+    # 同步寫 Redis 快取
     _redis(["SET", f"phone_profile:{p}", json.dumps(merged, ensure_ascii=False)])
 
 def _mask_name(name: str) -> str:
@@ -2465,18 +2490,40 @@ def customers_admin():
     customers = _fetch_from_supabase(q)
     total = len(customers)
 
+    # 批次查地址（一次撈全部，避免 N+1）
+    addr_map = {}
+    if customers and SUPABASE_URL:
+        try:
+            phones_str = ",".join(f'"{c["phone"]}"' for c in customers if c.get("phone"))
+            r_addr = requests.get(
+                f"{SUPABASE_URL}/rest/v1/addresses",
+                headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+                params={"phone": f"in.({phones_str})", "order": "is_default.desc", "limit": "2000"},
+                timeout=5,
+            )
+            if r_addr.ok:
+                for a in r_addr.json():
+                    ph = a.get("phone", "")
+                    if ph not in addr_map:
+                        addr_map[ph] = []
+                    addr_map[ph].append(a.get("address", ""))
+        except Exception:
+            pass
+
     rows_html = ""
     for p in customers:
         name    = p.get("name", "") or ""
         phone   = p.get("phone", "") or ""
-        address = p.get("address", "") or "（無）"
+        addrs   = addr_map.get(phone, [])
+        address  = addrs[0] if len(addrs) > 0 else "（無）"
+        address2 = addrs[1] if len(addrs) > 1 else ""
         notes   = p.get("notes", "") or ""
         updated = (p.get("updated_at", "") or "")[:10]
         rows_html += f"""
 <tr>
   <td>{name}</td>
   <td>{phone}</td>
-  <td style='font-size:12px'>{address}</td>
+  <td style='font-size:12px'>{address}{"<br><span style='color:#aaa'>"+address2+"</span>" if address2 else ""}</td>
   <td style='font-size:12px'>
     <form method='post' action='/customers?token={token}' style='display:flex;gap:4px;align-items:center'>
       <input type='hidden' name='phone' value='{phone}'>
