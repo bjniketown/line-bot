@@ -2080,6 +2080,10 @@ def webhook():
             # ── 自動記錄客戶名單 ─────────────────────────────────────────────
             register_customer(uid)
 
+            if len(text) > 100:
+                reply(token, "您的訊息太長了，請簡短說明需求 😊")
+                continue
+
             now = time.time()
             if now - last_request.get(uid, 0) < RATE_LIMIT_SECONDS:
                 reply(token, "您傳訊息太快了，請稍後再試 😊")
