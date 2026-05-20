@@ -340,7 +340,7 @@ def clear_customer_profile(uid: str):
     _redis(["DEL", f"profile:{uid}"])
 
 def get_customer_profile(uid: str) -> dict:
-    """取得客人資料（姓名、電話、地址）。"""
+    """取得客人資料。優先查 Redis，找不到時用 line_uid 查 Supabase 並回寫 Redis。"""
     if not UPSTASH_URL:
         return {}
     raw = _redis(["GET", f"profile:{uid}"])
@@ -349,7 +349,31 @@ def get_customer_profile(uid: str) -> dict:
             return json.loads(raw)
         except Exception:
             pass
+    # Redis 無資料，改用 line_uid 查 Supabase
+    if SUPABASE_URL and uid:
+        p = get_phone_profile_by_uid(uid)
+        if p:
+            _redis(["SET", f"profile:{uid}", json.dumps(p, ensure_ascii=False), "EX", 31536000])
+            return p
     return {}
+
+def get_phone_profile_by_uid(uid: str) -> dict:
+    """用 line_uid 查 Supabase customers，回傳與 get_phone_profile 相同格式的 dict。"""
+    if not SUPABASE_URL or not uid:
+        return {}
+    row = _supa_get("customers", {"line_uid": uid})
+    if not row:
+        return {}
+    phone = row.get("phone", "")
+    addrs = _supa_get_addresses(phone) if phone else []
+    address = addrs[0].get("address", "") if addrs else ""
+    return {
+        "name": row.get("name", ""),
+        "phone": phone,
+        "address": address,
+        "line_uid": uid,
+        "notes": row.get("notes", ""),
+    }
 
 # ── 電話標準化與 phone_profile 雙層查詢 ──────────────────────────────────
 _PHONE_STRIP_RE = re.compile(r'[\s\-\(\)\.]')
