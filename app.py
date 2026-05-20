@@ -1865,7 +1865,8 @@ def _handle_claude(token, uid, text):
     def worker():
         try:
             result_holder[0] = ask_with_cache(uid, text)
-        except Exception:
+        except Exception as e:
+            print(f"[WORKER_ERR] {type(e).__name__}: {str(e)[:200]}")
             result_holder[0] = "很抱歉，系統暫時忙碌，請稍後再試或直撥 04-25882881"
         finally:
             done.set()
