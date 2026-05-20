@@ -1668,6 +1668,13 @@ _FUTURE_DATE_KW = (
     "週一", "週二", "週三", "週四", "週五", "週六", "週日",
     "禮拜一", "禮拜二", "禮拜三", "禮拜四", "禮拜五", "禮拜六", "禮拜日",
 )
+_FUTURE_DATE_RE = re.compile(r'\d{1,2}[/\-月]\d{1,2}')  # 5/24、5-24、5月24 等具體日期
+
+def _has_future_date(text: str) -> bool:
+    """判斷訊息是否含有未來日期關鍵字或具體日期格式。"""
+    if any(kw in text for kw in _FUTURE_DATE_KW):
+        return True
+    return bool(_FUTURE_DATE_RE.search(text))
 
 def quick_rule_reply(text, uid=None):
     """打招呼/感謝/關鍵字 → 直接回傳，完全不呼叫 Claude。"""
@@ -1678,7 +1685,7 @@ def quick_rule_reply(text, uid=None):
             return "非常抱歉，目前連假期間暫停接單 🙏\n假期結束後恢復，歡迎屆時再訂購 😊"
     # 門市停單（非連假）：只攔截今日取貨；含未來日期的讓 Claude 判斷（預約未來自取照常接單）
     elif store_status_text() and any(kw in t for kw in ("自取", "店取", "門市取", "取貨", "來店")):
-        if not any(kw in t for kw in _FUTURE_DATE_KW):
+        if not _has_future_date(t):
             _, closed_msg = _parse_store_closed()
             if "公休" in closed_msg:
                 store_reply = "非常抱歉，今日門市臨時公休暫停接單 🙏\n若方便改天前來，歡迎告知預計取貨日期，我為您安排 😊\n宅配照常服務，如有需要也可改宅配喔！"
