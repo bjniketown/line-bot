@@ -51,6 +51,28 @@
 
 ---
 
+## 2026-05-20（CRM 完善 + 安全性 + Bug 修正）
+
+### Bug 修正
+- **fix: 訂單成立時未綁定 LINE UID**（commit 8d19fd1）：宅配與自取訂單成立時，`line_uid` 沒有一併寫入 Supabase customers，導致所有新客人都未綁定 → 修正為訂單成立時帶入 `line_uid`
+- **fix: 後台客戶地址搜尋無效**（commit 05cd1fb）：搜尋條件誤用 `customers.address`（欄位不存在），改為同時查 `addresses` 表
+- **fix: 後台 CSV 匯出地址空白**（commit 05cd1fb）：匯出改從 `addresses` 表批次撈取，新增地址1/地址2 分欄
+
+### 新增功能
+- **後台客戶列表加入 LINE UID 綁定狀態**（commit 61d84d7）：顯示「✔ 已綁定」或「未綁定」
+- **後台支援手動輸入 LINE UID**（commit 4812f97）：未綁定客人可直接在後台填入 UID 手動綁定
+- **Webhook 加入訊息 log**（commit d51448e）：每則訊息印出時間、UID、訊息前50字，方便在 Render log 追蹤客人 UID
+- **客人訊息長度限制 100 字**（commit 87671ce）：超過直接擋回，防止惡意攻擊耗盡 token
+
+### Redis 清理
+- **清除 phone_profile:* 1,173 筆**：客戶資料已全部遷移 Supabase，舊資料確認清除
+- **27 筆 LINE 互動客戶從 Redis profile:* 同步至 Supabase**：含 line_uid 綁定
+
+### 資料補綁
+- 今日有對話但未自動綁定的客人已手動補綁（黃于真、黃譯葳、華）
+
+---
+
 ## 使用說明
 
 每次對話結束前，請告訴 Claude「把今天的重要決定存起來」，Claude 會：
