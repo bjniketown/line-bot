@@ -2015,11 +2015,13 @@ def ask(uid, msg):
                 "name": parts[0].strip(),
                 "phone": parts[1].strip(),
                 "address": parts[2].strip(),
+                "line_uid": uid,
             })
         elif order_type == "pickup" and len(parts) >= 2:
             save_customer_profile(uid, {
                 "name": parts[0].strip(),
                 "phone": parts[1].strip(),
+                "line_uid": uid,
             })
         _save_order_record(order_type, order_info, clean, uid)
 
