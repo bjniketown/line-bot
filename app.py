@@ -1708,9 +1708,12 @@ def quick_rule_reply(text, uid=None):
     if is_holiday_mode():
         if any(kw in t for kw in ("自取", "店取", "門市取", "取貨", "來店", "宅配", "訂購", "下單")):
             return "非常抱歉，目前連假期間暫停接單 🙏\n假期結束後恢復，歡迎屆時再訂購 😊"
-    # 門市停單（非連假）：只攔截今日取貨；含未來日期的讓 Claude 判斷（預約未來自取照常接單）
+    # 門市停單（非連假）：只攔截今日取貨；含未來日期或純表達取貨方式的訊息讓 Claude 判斷
     elif store_status_text() and any(kw in t for kw in ("自取", "店取", "門市取", "取貨", "來店")):
-        if not _has_future_date(t):
+        _today_kw = ("今天", "今日", "現在", "等一下", "等下", "馬上", "待會", "待会", "一下")
+        has_today = any(kw in t for kw in _today_kw)
+        is_short = len(t) <= 4  # 「自取」「門市取」「來店取」等純取貨方式
+        if not _has_future_date(t) and (has_today or is_short):
             _, closed_msg = _parse_store_closed()
             if "公休" in closed_msg:
                 store_reply = "非常抱歉，今日門市臨時公休暫停接單 🙏\n若方便改天前來，歡迎告知預計取貨日期，我為您安排 😊\n宅配照常服務，如有需要也可改宅配喔！"
