@@ -2093,10 +2093,12 @@ def ask(uid, msg):
     try:
         raw = _call_claude(history, uid)
     except anthropic.APIStatusError as e:
+        print(f"[API_ERR] status={e.status_code} body={str(e)[:200]}")
         if "credit" in str(e).lower() or e.status_code == 529:
             return "很抱歉，服務暫時無法使用，請直撥 04-25882881", False
         return "很抱歉，系統暫時忙碌，請稍後再試或直撥 04-25882881", False
-    except Exception:
+    except Exception as e:
+        print(f"[API_ERR] unexpected: {type(e).__name__}: {str(e)[:200]}")
         return "很抱歉，系統暫時忙碌，請稍後再試或直撥 04-25882881", False
 
     clean, order_type, order_info = extract_order(raw)
