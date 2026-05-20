@@ -2030,9 +2030,13 @@ def _call_claude(history: list, uid: str = "") -> str:
          "cache_control": {"type": "ephemeral"}},
         {"type": "text", "text": current_date_text() + ("".join(f"\n{s}" for s in extras))},
     ]
-    full_warn = _full_date_warning(history)
-    if full_warn:
-        system_blocks.append({"type": "text", "text": full_warn})
+    # 自取情境不注入宅配排程警告
+    _pickup_kw = ("自取", "店取", "門市取", "取貨", "來店", "門市自取")
+    _is_pickup = any(kw in current_msg for kw in _pickup_kw)
+    if not _is_pickup:
+        full_warn = _full_date_warning(history)
+        if full_warn:
+            system_blocks.append({"type": "text", "text": full_warn})
     # 只在 user 訊息嵌入時間戳，讓 Claude 有時間感但不模仿格式
     api_history = []
     for m in history:
