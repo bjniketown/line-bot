@@ -288,30 +288,36 @@ def chili_soldout_text() -> str:
         )
     return ""
 
-def set_busy_season(reason: str, start: str, end: str):
-    """設定繁盛時期，格式 reason|start|end，到結束日隔天自動失效。"""
+def set_busy_season(reason: str, start: str, end: str, delivery_days: int = 1):
+    """設定繁盛時期，格式 reason|start|end|delivery_days，到結束日隔天自動失效。"""
     try:
         end_dt  = datetime.strptime(end, "%Y-%m-%d").replace(
             hour=23, minute=59, second=59, tzinfo=_TZ_TW)
         ttl = max(60, int((end_dt - datetime.now(_TZ_TW)).total_seconds()))
     except Exception:
         ttl = 86400 * 30
-    _redis(["SET", "busy_season", f"{reason}|{start}|{end}", "EX", ttl])
+    _redis(["SET", "busy_season", f"{reason}|{start}|{end}|{delivery_days}", "EX", ttl])
 
 def clear_busy_season():
     _redis(["DEL", "busy_season"])
 
-def get_busy_season() -> tuple[str, str, str]:
-    """回傳 (reason, start, end)，未設定時回傳空字串。"""
+def get_busy_season() -> tuple[str, str, str, int]:
+    """回傳 (reason, start, end, delivery_days)，未設定時回傳空字串與預設1天。"""
     raw = _redis(["GET", "busy_season"]) or ""
-    parts = raw.split("|", 2)
-    if len(parts) == 3:
-        return parts[0], parts[1], parts[2]
-    return "", "", ""
+    parts = raw.split("|", 3)
+    if len(parts) >= 3:
+        days = int(parts[3]) if len(parts) == 4 and parts[3].isdigit() else 1
+        return parts[0], parts[1], parts[2], days
+    return "", "", "", 1
+
+def get_delivery_days() -> int:
+    """回傳目前繁盛時期的配送天數，非繁盛時期預設 1。"""
+    _, _, _, days = get_busy_season()
+    return days
 
 def busy_season_text() -> str:
     """回傳繁盛時期注入文字，供每次呼叫 Claude 時動態注入。"""
-    reason, start, end = get_busy_season()
+    reason, start, end, _ = get_busy_season()
     if not reason:
         return ""
     return (
@@ -1149,6 +1155,13 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
   ⚠️ 漏寫 <<CALC>> 會導致系統金額計算錯誤，這是嚴重錯誤，絕對不可省略。
   ⚠️ 宅配情境下，<<CALC>> 絕對不能包含水餃；水餃屬門市自取品項，即使同一訊息中提到水餃，也不可列入宅配的 <<CALC>>。
   注意：只填品名、數量、單價，絕對不要自行加總，系統會自動計算並顯示正確總金額
+
+▶ 出貨日／收件日標記【有提到日期時必須使用】：
+  當你在回覆中提到具體出貨日期或收件日期，必須在該句話末尾附上對應標記，系統會自動驗算並修正。
+  - 提到出貨日：在該句末附上 <<SHIPDATE:YYYY-MM-DD>>（例：預計週一 2026-05-25 出貨 <<SHIPDATE:2026-05-25>>）
+  - 提到收件日：在該句末附上 <<RECVDATE:YYYY-MM-DD>>（例：預計 2026-05-26 收件 <<RECVDATE:2026-05-26>>）
+  ⚠️ 日期標記只填一個，不可同時附上兩個。出貨日填 SHIPDATE，收件日填 RECVDATE，選其一即可。
+  ⚠️ 系統會自動驗算，若日期錯誤會自動覆蓋修正，你只負責寫出你判斷的日期，不必自行驗算。
 
 以上標記不得讓客戶看到，資訊不齊全時絕對不加。"""
 
@@ -2002,6 +2015,74 @@ def _call_claude(history: list, uid: str = "") -> str:
     raise last_err
 
 
+_SHIPDATE_TAG  = re.compile(r'<<SHIPDATE:(\d{4}-\d{2}-\d{2})>>', re.IGNORECASE)
+_RECVDATE_TAG  = re.compile(r'<<RECVDATE:(\d{4}-\d{2}-\d{2})>>', re.IGNORECASE)
+_SHIP_WEEKDAYS = {0, 2, 4}  # 週一=0, 週三=2, 週五=4
+
+def _next_ship_date(from_date):
+    """從指定日期起找最近可出貨日（週一三五且未滿檔）。"""
+    full = get_shipping_full_dates()
+    d = from_date
+    for _ in range(30):
+        if d.weekday() in _SHIP_WEEKDAYS and d.strftime("%Y-%m-%d") not in full:
+            return d
+        d += timedelta(days=1)
+    return from_date
+
+def validate_ship_recv_date(text: str) -> str:
+    """驗算 <<SHIPDATE:YYYY-MM-DD>> 或 <<RECVDATE:YYYY-MM-DD>> 標記，不合法時覆蓋為正確日期。"""
+    days = get_delivery_days()
+    full = get_shipping_full_dates()
+
+    def _fix_ship(m):
+        raw = m.group(1)
+        try:
+            ship = datetime.strptime(raw, "%Y-%m-%d").replace(tzinfo=_TZ_TW)
+        except Exception:
+            return ""
+        ship_str = ship.strftime("%Y-%m-%d")
+        weekday  = _WEEKDAYS[ship.weekday()]
+        recv     = ship + timedelta(days=days)
+        recv_str = recv.strftime("%Y-%m-%d")
+        if ship.weekday() not in _SHIP_WEEKDAYS:
+            correct      = _next_ship_date(ship)
+            correct_recv = correct + timedelta(days=days)
+            return (f"\n⚠️ 系統驗算：{ship_str}（{weekday}）非出貨日，"
+                    f"已自動修正為 {correct.strftime('%Y-%m-%d')}（{_WEEKDAYS[correct.weekday()]}）出貨，"
+                    f"預計 {correct_recv.strftime('%Y-%m-%d')} 收件。")
+        if ship_str in full:
+            correct      = _next_ship_date(ship + timedelta(days=1))
+            correct_recv = correct + timedelta(days=days)
+            return (f"\n⚠️ 系統驗算：{ship_str} 排程已滿，"
+                    f"已自動修正為 {correct.strftime('%Y-%m-%d')}（{_WEEKDAYS[correct.weekday()]}）出貨，"
+                    f"預計 {correct_recv.strftime('%Y-%m-%d')} 收件。")
+        return f"\n✅ 出貨日 {ship_str}（{weekday}），預計 {recv_str} 收件。"
+
+    def _fix_recv(m):
+        raw = m.group(1)
+        try:
+            recv = datetime.strptime(raw, "%Y-%m-%d").replace(tzinfo=_TZ_TW)
+        except Exception:
+            return ""
+        ship     = recv - timedelta(days=days)
+        ship_str = ship.strftime("%Y-%m-%d")
+        weekday  = _WEEKDAYS[ship.weekday()]
+        if ship.weekday() not in _SHIP_WEEKDAYS or ship_str in full:
+            opt1      = _next_ship_date(ship)
+            opt2      = _next_ship_date(opt1 + timedelta(days=1))
+            opt1_recv = opt1 + timedelta(days=days)
+            opt2_recv = opt2 + timedelta(days=days)
+            return (f"\n⚠️ 系統驗算：{raw} 收件需 {ship_str}（{weekday}）出貨，但該日無法出貨。"
+                    f"請客人選擇：\n"
+                    f"方案一：{opt1.strftime('%Y-%m-%d')}（{_WEEKDAYS[opt1.weekday()]}）出貨 → {opt1_recv.strftime('%Y-%m-%d')} 收件\n"
+                    f"方案二：{opt2.strftime('%Y-%m-%d')}（{_WEEKDAYS[opt2.weekday()]}）出貨 → {opt2_recv.strftime('%Y-%m-%d')} 收件")
+        return f"\n✅ 收件日 {raw}，出貨日 {ship_str}（{weekday}）確認。"
+
+    text = _SHIPDATE_TAG.sub(_fix_ship, text)
+    text = _RECVDATE_TAG.sub(_fix_recv, text)
+    return text
+
+
 def ask(uid, msg):
     """呼叫 Claude，回傳 (乾淨文字, 是否有訂單)。"""
     history = get_history(uid)
@@ -2018,6 +2099,7 @@ def ask(uid, msg):
 
     clean, order_type, order_info = extract_order(raw)
     clean = inject_reminder(clean)
+    clean = validate_ship_recv_date(clean)
     if order_type:
         clean = inject_correct_total(clean, order_type)
     else:
@@ -2301,8 +2383,10 @@ def store_admin():
         reason_param = request.args.get("reason", "").strip()
         start_param  = request.args.get("start", "").strip()
         end_param    = request.args.get("end", "").strip()
+        days_param   = request.args.get("delivery_days", "1").strip()
+        days_int     = int(days_param) if days_param.isdigit() and int(days_param) >= 1 else 1
         if reason_param and start_param and end_param:
-            set_busy_season(reason_param, start_param, end_param)
+            set_busy_season(reason_param, start_param, end_param, days_int)
         return _redirect(token)
     elif action == "busy_season_clear":
         clear_busy_season()
@@ -2313,7 +2397,7 @@ def store_admin():
     full_dates = get_shipping_full_dates()
     import json as _j
     fd_json    = _j.dumps(sorted(full_dates))
-    bs_reason, bs_start, bs_end = get_busy_season()
+    bs_reason, bs_start, bs_end, bs_days = get_busy_season()
 
     s_cls  = "bg-r" if store_msg  else "bg-g"
     s_txt  = "🔴 門市停單中" if store_msg else "🟢 正常接單"
@@ -2442,6 +2526,12 @@ def store_admin():
         "<label style='font-size:13px;color:var(--brown);width:36px'>結束</label>"
         f"<input name='end' type='date' value='{bs_end}' "
         "style='flex:1;padding:7px 10px;border:1.5px solid var(--tan);border-radius:7px;font-size:13px;font-family:inherit;background:var(--cream);color:var(--ink)'>"
+        "</div>"
+        "<div style='display:flex;align-items:center;gap:8px'>"
+        "<label style='font-size:13px;color:var(--brown);width:60px'>配送天數</label>"
+        f"<input name='delivery_days' type='number' min='1' max='7' value='{bs_days}' "
+        "style='width:60px;padding:7px 10px;border:1.5px solid var(--tan);border-radius:7px;font-size:13px;font-family:inherit;background:var(--cream);color:var(--ink)'>"
+        "<span style='font-size:12px;color:var(--brown)'>天（一般填1，繁盛時期填2或3）</span>"
         "</div>"
         "<div class='btn-row' style='margin-top:4px'>"
         "<button class='btn btn-gold' type='submit'>設定繁盛時期</button>"
