@@ -2433,16 +2433,20 @@ def customers_admin():
 
     from flask import Response
 
-    # 更新備註
+    # 更新備註 / LINE UID
     if request.method == "POST":
         phone = request.form.get("phone", "").strip()
         notes = request.form.get("notes", "").strip()
+        line_uid_input = request.form.get("line_uid", "").strip()
         if phone and SUPABASE_URL:
+            patch_data = {"notes": notes}
+            if line_uid_input:
+                patch_data["line_uid"] = line_uid_input
             requests.patch(
                 f"{SUPABASE_URL}/rest/v1/customers?phone=eq.{phone}",
                 headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
                          "Content-Type": "application/json"},
-                json={"notes": notes}, timeout=5,
+                json=patch_data, timeout=5,
             )
         from flask import redirect
         return redirect(f"/customers?token={token}&q={request.form.get('q','')}")
@@ -2558,19 +2562,22 @@ def customers_admin():
         notes   = p.get("notes", "") or ""
         updated = (p.get("updated_at", "") or "")[:10]
         line_uid = p.get("line_uid", "") or ""
-        uid_display = f"<span style='color:#4caf50;font-size:10px'>✔ 已綁定</span>" if line_uid else "<span style='color:#ccc;font-size:10px'>未綁定</span>"
+        uid_badge = f"<span style='color:#4caf50;font-size:10px'>✔ 已綁定</span>" if line_uid else "<span style='color:#ccc;font-size:10px'>未綁定</span>"
         rows_html += f"""
 <tr>
   <td>{name}</td>
   <td>{phone}</td>
   <td style='font-size:12px'>{address}{"<br><span style='color:#aaa'>"+address2+"</span>" if address2 else ""}</td>
-  <td style='font-size:11px;text-align:center'>{uid_display}</td>
+  <td style='font-size:11px;text-align:center'>{uid_badge}</td>
   <td style='font-size:12px'>
-    <form method='post' action='/customers?token={token}' style='display:flex;gap:4px;align-items:center'>
+    <form method='post' action='/customers?token={token}' style='display:flex;flex-direction:column;gap:4px'>
       <input type='hidden' name='phone' value='{phone}'>
       <input type='hidden' name='q' value='{q}'>
-      <input type='text' name='notes' value='{notes}' placeholder='備註' style='width:130px;padding:4px 6px;border:1px solid #c9a96e;border-radius:6px;font-size:12px'>
-      <button type='submit' style='padding:4px 8px;background:#5c3d1e;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:11px'>儲存</button>
+      <div style='display:flex;gap:4px;align-items:center'>
+        <input type='text' name='notes' value='{notes}' placeholder='備註' style='width:120px;padding:4px 6px;border:1px solid #c9a96e;border-radius:6px;font-size:12px'>
+        <button type='submit' style='padding:4px 8px;background:#5c3d1e;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:11px'>儲存</button>
+      </div>
+      {"" if line_uid else f"<div style='display:flex;gap:4px;align-items:center'><input type='text' name='line_uid' placeholder='手動輸入 LINE UID' style='width:220px;padding:4px 6px;border:1px solid #f0ad4e;border-radius:6px;font-size:11px;color:#888'></div>"}
     </form>
   </td>
   <td style='font-size:11px;color:#999'>{updated}</td>
