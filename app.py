@@ -2076,6 +2076,7 @@ def webhook():
             text  = e["message"]["text"]
             token = e["replyToken"]
             uid   = e["source"]["userId"]
+            print(f"[MSG] {datetime.now(_TZ_TW).strftime('%Y-%m-%d %H:%M:%S')} uid={uid} msg={text[:50]}")
             # ── 自動記錄客戶名單 ─────────────────────────────────────────────
             register_customer(uid)
 
