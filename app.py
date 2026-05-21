@@ -397,17 +397,33 @@ def _supa_get_addresses(phone: str) -> list:
         return []
 
 def get_phone_profile(phone: str) -> dict:
-    """以電話查詢客戶資料，從 Supabase 查詢。"""
+    """以電話查詢客戶資料：同時比對主電話欄與備註欄，回傳第一筆符合的資料。"""
     if not phone:
         return {}
     p = normalize_phone(phone)
-    row = _supa_get("customers", {"phone": p})
+    if not p:
+        return {}
+    # 同時查主電話與備註（OR 查詢）
+    row = None
+    if SUPABASE_URL:
+        try:
+            r = requests.get(
+                f"{SUPABASE_URL}/rest/v1/customers",
+                headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+                params={"or": f"(phone.eq.{p},notes.ilike.*{p}*)", "limit": "1"},
+                timeout=5,
+            )
+            if r.ok and r.json():
+                row = r.json()[0]
+        except Exception:
+            pass
     if row:
-        addrs = _supa_get_addresses(p)
+        rp = row.get("phone", p)
+        addrs = _supa_get_addresses(rp)
         address = addrs[0].get("address", "") if addrs else ""
         address2 = addrs[1].get("address", "") if len(addrs) > 1 else ""
         return {"name": row.get("name", ""), "address": address, "address2": address2,
-                "phone": p, "line_uid": row.get("line_uid", ""), "notes": row.get("notes", "")}
+                "phone": rp, "line_uid": row.get("line_uid", ""), "notes": row.get("notes", "")}
     return {}
 
 def save_phone_profile(phone: str, profile: dict):
@@ -529,6 +545,19 @@ def save_customer_profile(uid: str, profile: dict):
     if '*' in phone: phone = ""
     if '*' in addr:  addr = ""
 
+    # 多支電話處理：取第一支合法號碼為主電話，其餘附加到備註
+    extra_phones_note = ""
+    if phone:
+        all_phones = [normalize_phone(s) for s in re.split(r'[,/、\s]+', phone) if s.strip()]
+        valid_phones = [p for p in all_phones if _is_tw_phone(p)]
+        if valid_phones:
+            phone = valid_phones[0]
+            extras = valid_phones[1:]
+            if extras:
+                extra_phones_note = "備用電話：" + "、".join(extras)
+        else:
+            phone = ""
+
     if not phone and not uid:
         return
 
@@ -544,6 +573,11 @@ def save_customer_profile(uid: str, profile: dict):
             update["line_uid"] = uid
         if name and name != existing.get("name", ""):
             update["name"] = name
+        # 備用電話附加到備註（避免重複）
+        if extra_phones_note:
+            old_notes = existing.get("notes", "") or ""
+            if extra_phones_note not in old_notes:
+                update["notes"] = (old_notes + "　" + extra_phones_note).strip() if old_notes else extra_phones_note
         ex_phone = existing.get("phone", "")
         p = ex_phone or phone
         _supa_upsert("customers", {"phone": p, **update})
@@ -558,7 +592,8 @@ def save_customer_profile(uid: str, profile: dict):
     else:
         # 全新客人：完整寫入
         if phone:
-            save_phone_profile(phone, {"name": name, "phone": phone, "address": addr, "line_uid": uid})
+            notes_val = extra_phones_note or ""
+            save_phone_profile(phone, {"name": name, "phone": phone, "address": addr, "line_uid": uid, "notes": notes_val})
 
 def customer_profile_text(uid: str, current_msg: str = "") -> str:
     """回傳客人資料提示，供每次呼叫 Claude 時動態注入。
