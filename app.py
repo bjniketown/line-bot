@@ -2781,40 +2781,121 @@ def customers_admin():
         except Exception:
             pass
 
+    # 批次撈 Redis 訂單，建立電話 → {count, last_type, last_date, orders[]} 對應表
+    order_map = {}
+    try:
+        all_order_keys = (_redis(["KEYS", "order:*:order"]) or []) + (_redis(["KEYS", "order:*:pickup"]) or [])
+        if all_order_keys:
+            all_vals = _redis(["MGET"] + all_order_keys) or []
+            for raw_o in all_vals:
+                if not raw_o:
+                    continue
+                try:
+                    r_o = json.loads(raw_o)
+                    ph = normalize_phone(r_o.get("phone", ""))
+                    if not ph:
+                        continue
+                    if ph not in order_map:
+                        order_map[ph] = {"count": 0, "last_type": "", "last_date": "", "orders": []}
+                    order_map[ph]["count"] += 1
+                    o_date = (r_o.get("ship_date") or r_o.get("pickup_time", "")[:10] or r_o.get("time", "")[:10])
+                    if o_date > order_map[ph]["last_date"]:
+                        order_map[ph]["last_date"] = o_date
+                        order_map[ph]["last_type"] = r_o.get("type", "")
+                    order_map[ph]["orders"].append({
+                        "date": o_date,
+                        "type": r_o.get("type", ""),
+                        "items": r_o.get("items", ""),
+                    })
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    def _customer_tags(phone):
+        """回傳 [(label, color), ...] 最多兩個標籤：客人類型 + 回購頻率。"""
+        om = order_map.get(normalize_phone(phone), {})
+        count = om.get("count", 0)
+        last_type = om.get("last_type", "")
+        if count == 0:
+            return []
+        kind = "宅配" if "宅" in last_type else "自取"
+        tags = []
+        # 標籤1：客人類型
+        if count == 1:
+            color = "#1976d2" if kind == "宅配" else "#388e3c"
+            tags.append((f"全新{kind}", color))
+        else:
+            color = "#e65100" if kind == "宅配" else "#7b1fa2"
+            tags.append((f"舊客{kind}", color))
+        # 標籤2：回購頻率（取最近兩筆訂單日期差）
+        if count >= 2:
+            dates = sorted(
+                [o["date"] for o in om.get("orders", []) if o.get("date")],
+                reverse=True,
+            )
+            if len(dates) >= 2:
+                try:
+                    d1 = datetime.strptime(dates[0][:10], "%Y-%m-%d")
+                    d2 = datetime.strptime(dates[1][:10], "%Y-%m-%d")
+                    gap = (d1 - d2).days
+                    if gap <= 7:
+                        tags.append(("週回購", "#c62828"))
+                    elif gap <= 30:
+                        tags.append(("月回購", "#ef6c00"))
+                    else:
+                        tags.append(("年回購", "#546e7a"))
+                except Exception:
+                    pass
+        return tags
+
+    # 建立 modal 用的客戶 JSON 資料
+    import html as _html
+    modal_data = []
     rows_html = ""
-    for p in customers:
-        name    = p.get("name", "") or ""
-        phone   = p.get("phone", "") or ""
-        addrs   = addr_map.get(phone, [])
-        address  = addrs[0] if len(addrs) > 0 else "（無）"
+    for idx, p in enumerate(customers):
+        name     = p.get("name", "") or ""
+        phone    = p.get("phone", "") or ""
+        addrs    = addr_map.get(phone, [])
+        address  = addrs[0] if addrs else "（無）"
         address2 = addrs[1] if len(addrs) > 1 else ""
-        notes   = p.get("notes", "") or ""
-        updated = (p.get("updated_at", "") or "")[:10]
+        notes    = p.get("notes", "") or ""
+        updated  = (p.get("updated_at", "") or "")[:10]
         line_uid = p.get("line_uid", "") or ""
-        uid_badge = f"<span style='color:#4caf50;font-size:10px'>✔ 已綁定</span>" if line_uid else "<span style='color:#ccc;font-size:10px'>未綁定</span>"
+        uid_badge = "<span style='color:#4caf50;font-size:11px'>✔ 已綁定</span>" if line_uid else "<span style='color:#ccc;font-size:11px'>未綁定</span>"
+        tags = _customer_tags(phone)
+        om = order_map.get(normalize_phone(phone), {})
+        last_date = om.get("last_date", "")
+        tag_html = " ".join(
+            f"<span style='background:{c};color:#fff;padding:2px 7px;border-radius:10px;font-size:11px;white-space:nowrap'>{t}</span>"
+            for t, c in tags
+        )
+        tag_text_combined = " ".join(t for t, _ in tags)
+
+        # modal 資料
+        orders_for_modal = sorted(om.get("orders", []), key=lambda x: x["date"], reverse=True)[:5]
+        modal_data.append({
+            "idx": idx, "name": name, "phone": phone,
+            "addrs": addrs, "notes": notes, "line_uid": line_uid,
+            "tag": tag_text_combined, "last_date": last_date,
+            "orders": orders_for_modal,
+        })
+
         rows_html += f"""
-<tr>
+<tr class='crow' data-idx='{idx}' style='cursor:pointer'>
   <td>{name}</td>
   <td>{phone}</td>
-  <td style='font-size:12px'>{address}{"<br><span style='color:#aaa'>"+address2+"</span>" if address2 else ""}</td>
-  <td style='font-size:11px;text-align:center'>{uid_badge}</td>
-  <td style='font-size:12px'>
-    <form method='post' action='/customers?token={token}' style='display:flex;flex-direction:column;gap:4px'>
-      <input type='hidden' name='phone' value='{phone}'>
-      <input type='hidden' name='q' value='{q}'>
-      <div style='display:flex;gap:4px;align-items:center'>
-        <input type='text' name='notes' value='{notes}' placeholder='備註' style='width:120px;padding:4px 6px;border:1px solid #c9a96e;border-radius:6px;font-size:12px'>
-        <button type='submit' style='padding:4px 8px;background:#5c3d1e;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:11px'>儲存</button>
-      </div>
-      {"" if line_uid else f"<div style='display:flex;gap:4px;align-items:center'><input type='text' name='line_uid' placeholder='手動輸入 LINE UID' style='width:220px;padding:4px 6px;border:1px solid #f0ad4e;border-radius:6px;font-size:11px;color:#888'></div>"}
-    </form>
-  </td>
-  <td style='font-size:11px;color:#999'>{updated}</td>
+  <td style='font-size:12px'>{address}{"<br><span style='color:#aaa;font-size:11px'>"+address2+"</span>" if address2 else ""}</td>
+  <td style='text-align:center'>{uid_badge}</td>
+  <td>{tag_html}</td>
+  <td style='font-size:11px;color:#999'>{last_date or updated}</td>
 </tr>"""
+
+    modal_json = json.dumps(modal_data, ensure_ascii=False)
 
     css = """<style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:'Noto Sans TC',sans-serif;background:#fdf8f2;color:#3b2a1a;padding:16px}
+body{font-family:system-ui,'Noto Sans TC',sans-serif;background:#fdf8f2;color:#3b2a1a;padding:16px}
 h1{font-size:18px;margin-bottom:12px;color:#5c3d1e}
 .toolbar{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;align-items:center}
 input[type=text]{padding:8px 12px;border:1.5px solid #c9a96e;border-radius:8px;font-size:14px;background:#fffdf8;width:220px}
@@ -2824,8 +2905,74 @@ input[type=text]{padding:8px 12px;border:1.5px solid #c9a96e;border-radius:8px;f
 table{width:100%;border-collapse:collapse;background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.08)}
 th{background:#5c3d1e;color:#fff;padding:10px 12px;font-size:13px;text-align:left}
 td{padding:9px 12px;border-bottom:1px solid #f0e8da;font-size:13px;vertical-align:middle}
-tr:last-child td{border-bottom:none}tr:hover td{background:#fdf3e7}
+tr:last-child td{border-bottom:none}.crow:hover td{background:#fdf3e7}
+/* modal */
+#overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:100;align-items:center;justify-content:center}
+#overlay.show{display:flex}
+#modal{background:#fff;border-radius:14px;padding:22px;width:92%;max-width:480px;max-height:85vh;overflow-y:auto;position:relative}
+#modal h2{font-size:16px;color:#5c3d1e;margin-bottom:14px}
+.mrow{display:flex;gap:8px;margin-bottom:9px;font-size:13px}
+.mlabel{color:#888;min-width:70px;flex-shrink:0}
+.mval{color:#3b2a1a;word-break:break-all}
+.close-btn{position:absolute;top:14px;right:16px;font-size:20px;cursor:pointer;color:#aaa;background:none;border:none}
+.order-item{background:#fdf8f2;border-radius:8px;padding:8px 10px;margin-bottom:6px;font-size:12px}
+.save-form input{padding:6px 10px;border:1px solid #c9a96e;border-radius:7px;font-size:13px;width:100%}
+.save-form button{margin-top:8px;padding:8px 18px;background:#5c3d1e;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:13px}
 </style>"""
+
+    modal_html = """
+<div id='overlay'>
+  <div id='modal'>
+    <button class='close-btn' onclick='closeModal()'>✕</button>
+    <h2 id='m-name'></h2>
+    <div class='mrow'><span class='mlabel'>電話</span><span class='mval' id='m-phone'></span></div>
+    <div class='mrow'><span class='mlabel'>標籤</span><span class='mval' id='m-tag'></span></div>
+    <div class='mrow'><span class='mlabel'>最後訂單</span><span class='mval' id='m-last'></span></div>
+    <div class='mrow'><span class='mlabel'>地址</span><span class='mval' id='m-addr'></span></div>
+    <div class='mrow'><span class='mlabel'>LINE UID</span><span class='mval' id='m-uid'></span></div>
+    <div class='mrow'><span class='mlabel'>備註</span><span class='mval' id='m-notes'></span></div>
+    <div style='margin:12px 0 6px;font-size:12px;color:#888;font-weight:bold'>最近訂單記錄</div>
+    <div id='m-orders'></div>
+    <div style='margin-top:14px'>
+      <form class='save-form' method='post' id='save-form'>
+        <input type='hidden' name='token' id='sf-token'>
+        <input type='hidden' name='phone' id='sf-phone'>
+        <input type='text' name='notes' id='sf-notes' placeholder='備註'>
+        <input type='text' name='line_uid' id='sf-uid' placeholder='LINE UID（未綁定時填入）' style='margin-top:6px'>
+        <button type='submit'>儲存備註 / UID</button>
+      </form>
+    </div>
+  </div>
+</div>"""
+
+    script = f"""
+<script>
+const MDATA = {modal_json};
+const TOKEN = '{token}';
+function openModal(idx) {{
+  const d = MDATA[idx];
+  document.getElementById('m-name').textContent = d.name || '（無姓名）';
+  document.getElementById('m-phone').textContent = d.phone;
+  document.getElementById('m-tag').innerHTML = d.tag ? `<span style='background:#888;color:#fff;padding:2px 8px;border-radius:10px'>${{d.tag}}</span>` : '—';
+  document.getElementById('m-last').textContent = d.last_date || '—';
+  document.getElementById('m-addr').innerHTML = (d.addrs && d.addrs.length) ? d.addrs.join('<br>') : '（無）';
+  document.getElementById('m-uid').textContent = d.line_uid || '未綁定';
+  document.getElementById('m-notes').textContent = d.notes || '—';
+  const ob = document.getElementById('m-orders');
+  ob.innerHTML = d.orders.length ? d.orders.map(o=>`<div class='order-item'>${{o.date}} ${{o.type}} — ${{o.items}}</div>`).join('') : '<div style="color:#aaa;font-size:12px">無訂單記錄</div>';
+  document.getElementById('sf-phone').value = d.phone;
+  document.getElementById('sf-token').value = TOKEN;
+  document.getElementById('sf-notes').value = d.notes || '';
+  document.getElementById('sf-uid').value = d.line_uid || '';
+  document.getElementById('save-form').action = `/customers?token=${{TOKEN}}`;
+  document.getElementById('overlay').classList.add('show');
+}}
+function closeModal() {{ document.getElementById('overlay').classList.remove('show'); }}
+document.getElementById('overlay').addEventListener('click', function(e){{ if(e.target===this) closeModal(); }});
+document.querySelectorAll('.crow').forEach(tr => {{
+  tr.addEventListener('click', () => openModal(+tr.dataset.idx));
+}});
+</script>"""
 
     return (
         f"<!DOCTYPE html><html lang='zh-Hant'><head>"
@@ -2833,6 +2980,7 @@ tr:last-child td{border-bottom:none}tr:hover td{background:#fdf3e7}
         f"<meta name='referrer' content='no-referrer'>"
         f"<title>老鄰居 · 客戶資料</title>{css}"
         f"</head><body>"
+        + modal_html +
         f"<a href='/store?token={token}' style='display:inline-block;margin-bottom:12px;padding:7px 14px;background:#5c3d1e;color:#fff;border-radius:8px;text-decoration:none;font-size:13px'>← 回首頁</a>"
         f"<h1>老鄰居豆干絲 · 客戶資料庫</h1>"
         f"<div class='toolbar'>"
@@ -2845,9 +2993,10 @@ tr:last-child td{border-bottom:none}tr:hover td{background:#fdf3e7}
         f"<span class='cnt'>顯示 {total} 筆</span>"
         f"</div>"
         f"<table>"
-        f"<thead><tr><th>姓名</th><th>電話</th><th>地址</th><th>LINE</th><th>備註</th><th>更新</th></tr></thead>"
+        f"<thead><tr><th>姓名</th><th>電話</th><th>地址</th><th>LINE</th><th>標籤</th><th>最後訂單</th></tr></thead>"
         f"<tbody>{rows_html}</tbody>"
         f"</table>"
+        + script +
         f"</body></html>"
     )
 
