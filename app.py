@@ -2499,9 +2499,12 @@ def store_admin():
         "<div class='wrap'>"
 
         # ── 快速導覽 ──────────────────────────────────────────────────
-        "<div style='display:flex;gap:10px;margin-bottom:16px'>"
+        "<div style='display:flex;gap:10px;margin-bottom:8px'>"
         f"<a href='/orders?token={token}' style='flex:1;padding:12px;background:#5c3d1e;color:#fff;border-radius:10px;text-align:center;text-decoration:none;font-size:14px'>📋 訂單紀錄</a>"
         f"<a href='/customers?token={token}' style='flex:1;padding:12px;background:#8b5e3c;color:#fff;border-radius:10px;text-align:center;text-decoration:none;font-size:14px'>👥 客戶資料</a>"
+        "</div>"
+        "<div style='margin-bottom:16px'>"
+        f"<a href='/recent?token={token}' style='display:block;padding:12px;background:#6b4e8a;color:#fff;border-radius:10px;text-align:center;text-decoration:none;font-size:14px'>💬 UID 對話記憶</a>"
         "</div>"
 
         # ── 門市接單 ──────────────────────────────────────────────────
@@ -2843,36 +2846,6 @@ def orders_admin():
         from flask import redirect
         return redirect(f"/orders?token={token}&tab={tab}")
 
-    if action == "inject_memory":
-        from flask import redirect
-        phone_q = request.args.get("phone", "").strip()
-        msg_q   = request.args.get("msg", "").strip()
-        inject_result = ""
-        inject_name   = ""
-        if phone_q and msg_q:
-            p = normalize_phone(phone_q)
-            uid_q = ""
-            keys = _redis(["KEYS", "profile:*"]) or []
-            for k in keys:
-                raw = _redis(["GET", k])
-                if raw:
-                    try:
-                        d = json.loads(raw)
-                        if normalize_phone(d.get("phone", "")) == p:
-                            uid_q = k.replace("profile:", "")
-                            inject_name = d.get("name", "")
-                            break
-                    except Exception:
-                        pass
-            if uid_q:
-                history = get_history(uid_q)
-                history.append(_msg_with_time("assistant", msg_q))
-                set_history(uid_q, history[-10:])
-                inject_result = "ok"
-            else:
-                inject_result = "notfound"
-        return redirect(f"/orders?token={token}&tab={tab}&inject_result={inject_result}&inject_name={inject_name}&inject_phone={phone_q}")
-
     if action == "export":
         import io, csv as _csv
         from flask import Response
@@ -2973,22 +2946,6 @@ tr:hover td{background:#fdf3e7}
         "</head><body>"
         f"<a href='/store?token={token}' style='display:inline-block;margin-bottom:12px;padding:7px 14px;background:#5c3d1e;color:#fff;border-radius:8px;text-decoration:none;font-size:13px'>← 回首頁</a>"
         "<h1>老鄰居豆干絲 · 訂單紀錄</h1>"
-        "<div style='background:#fff8e1;border:1.5px solid #c9a96e;border-radius:10px;padding:14px;margin-bottom:16px'>"
-        "<div style='font-size:13px;font-weight:bold;color:#5c3d1e;margin-bottom:8px'>💬 注入怪人記憶</div>"
-        "<p style='font-size:12px;color:#888;margin-bottom:8px'>人工介入後，填入電話與訊息，讓怪人知道你說了什麼</p>"
-        f"<form method='get' action='/orders'>"
-        f"<input type='hidden' name='token' value='{token}'>"
-        f"<input type='hidden' name='tab' value='{tab}'>"
-        "<input type='hidden' name='action' value='inject_memory'>"
-        "<div style='display:flex;flex-direction:column;gap:8px'>"
-        "<input type='tel' name='phone' placeholder='客人電話（如 0912345678）' style='padding:8px 10px;border:1px solid #c9a96e;border-radius:8px;font-size:14px;width:100%'>"
-        "<textarea name='msg' placeholder='要讓怪人記住的內容（例：您的訂單已改為 5/20 12:00 取貨）' rows='3' style='padding:8px 10px;border:1px solid #c9a96e;border-radius:8px;font-size:14px;width:100%;resize:vertical'></textarea>"
-        "<button type='submit' style='padding:10px;background:#5c3d1e;color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer'>寫入記憶</button>"
-        "</div>"
-        "</form>"
-        + (f"<p style='margin-top:8px;color:#4caf50;font-size:13px'>✅ 已成功寫入 {request.args.get('inject_name','') or request.args.get('inject_phone','')} 的對話記憶</p>" if request.args.get('inject_result') == 'ok' else "")
-        + (f"<p style='margin-top:8px;color:#c0392b;font-size:13px'>❌ 找不到此電話的客戶資料</p>" if request.args.get('inject_result') == 'notfound' else "")
-        + "</div>"
         f"<div class='tabs'>{tab_delivery}{tab_pickup}</div>"
         "<div class='toolbar'>"
         f"<a class='btn btn-g' href='{export_url}'>匯出 CSV</a>"
