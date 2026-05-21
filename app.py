@@ -2159,6 +2159,8 @@ def ask(uid, msg):
     if raw is None:
         return "很抱歉，系統暫時忙碌，請稍後再試或直撥 04-25882881", False
 
+    print(f"[RAW] {raw[:300]}")
+
     clean, order_type, order_info = extract_order(raw)
     clean = inject_reminder(clean)
     clean = validate_ship_recv_date(clean)
@@ -2252,7 +2254,7 @@ def webhook():
             # ── 自動記錄客戶名單 ─────────────────────────────────────────────
             register_customer(uid)
 
-            if len(text) > 100:
+            if len(text) > 250:
                 reply(token, "您的訊息太長了，請簡短說明需求 😊")
                 continue
 
@@ -2996,6 +2998,134 @@ tr:hover td{background:#fdf3e7}
         f"<thead>{headers}</thead>"
         f"<tbody>{active_rows}</tbody>"
         "</table>"
+        "</body></html>"
+    )
+
+
+@app.route("/recent")
+def recent_admin():
+    """最近 20 個對話的 LINE UID + 顯示名稱，方便查詢後注入記憶。"""
+    token = request.args.get("token", "")
+    if not ADMIN_TOKEN or token != ADMIN_TOKEN:
+        abort(403)
+
+    # 取得所有 hist:U* 的 key，每個 key 撈最後一筆訊息的時間
+    keys = _redis(["KEYS", "hist:U*"]) or []
+    rows = []
+    for k in keys:
+        uid = k.replace("hist:", "")
+        raw = _redis(["GET", k])
+        last_time = ""
+        last_msg = ""
+        if raw:
+            try:
+                hist = json.loads(raw)
+                if hist:
+                    last = hist[-1]
+                    last_time = last.get("time", "")[:16] if last.get("time") else ""
+                    last_msg = last.get("content", "")
+                    if isinstance(last_msg, list):
+                        last_msg = " ".join(
+                            b.get("text", "") for b in last_msg if isinstance(b, dict) and b.get("type") == "text"
+                        )
+                    last_msg = str(last_msg)[:40]
+            except Exception:
+                pass
+        rows.append({"uid": uid, "last_time": last_time, "last_msg": last_msg})
+
+    # 按最後對話時間降序，取前 20
+    rows.sort(key=lambda r: r["last_time"], reverse=True)
+    rows = rows[:20]
+
+    # 批次查 LINE 顯示名稱
+    def _get_line_name(uid: str) -> str:
+        try:
+            r = requests.get(
+                f"https://api.line.me/v2/bot/profile/{uid}",
+                headers={"Authorization": f"Bearer {LINE_TOKEN}"},
+                timeout=5,
+            )
+            if r.ok:
+                return r.json().get("displayName", uid)
+        except Exception:
+            pass
+        return uid
+
+    for row in rows:
+        row["name"] = _get_line_name(row["uid"])
+
+    # 注入記憶
+    inject_result = request.args.get("inject_result", "")
+    inject_uid    = request.args.get("inject_uid", "")
+
+    action = request.args.get("action", "")
+    if action == "inject_memory":
+        from flask import redirect
+        uid_q = request.args.get("uid", "").strip()
+        msg_q = request.args.get("msg", "").strip()
+        if uid_q and msg_q:
+            history = get_history(uid_q)
+            history.append(_msg_with_time("assistant", msg_q))
+            set_history(uid_q, history[-10:])
+            return redirect(f"/recent?token={token}&inject_result=ok&inject_uid={uid_q}")
+        return redirect(f"/recent?token={token}&inject_result=fail&inject_uid={uid_q}")
+
+    # 建立表格列
+    table_rows = ""
+    for row in rows:
+        uid = row["uid"]
+        name = row["name"]
+        inject_form = (
+            f"<form method='get' action='/recent' style='display:inline'>"
+            f"<input type='hidden' name='token' value='{token}'>"
+            f"<input type='hidden' name='action' value='inject_memory'>"
+            f"<input type='hidden' name='uid' value='{uid}'>"
+            f"<input type='text' name='msg' placeholder='要注入的記憶' "
+            f"style='padding:4px 6px;border:1px solid #c9a96e;border-radius:6px;font-size:12px;width:220px'>"
+            f"<button type='submit' style='padding:4px 10px;background:#5c3d1e;color:#fff;border:none;"
+            f"border-radius:6px;font-size:12px;cursor:pointer;margin-left:4px'>寫入</button>"
+            f"</form>"
+        )
+        highlight = " background:#fff8e1;" if uid == inject_uid and inject_result == "ok" else ""
+        table_rows += (
+            f"<tr style='{highlight}'>"
+            f"<td style='font-size:12px;color:#888'>{row['last_time']}</td>"
+            f"<td style='font-weight:bold'>{name}</td>"
+            f"<td style='font-size:11px;color:#666;max-width:160px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis'>{row['last_msg']}</td>"
+            f"<td style='font-size:10px;color:#aaa;max-width:140px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis'>{uid}</td>"
+            f"<td>{inject_form}</td>"
+            f"</tr>"
+        )
+
+    inject_banner = ""
+    if inject_result == "ok":
+        inject_banner = f"<p style='color:#4caf50;font-weight:bold;margin-bottom:12px'>✅ 已成功寫入 {inject_uid} 的對話記憶</p>"
+    elif inject_result == "fail":
+        inject_banner = "<p style='color:#c0392b;font-weight:bold;margin-bottom:12px'>❌ 注入失敗，請確認 UID</p>"
+
+    return (
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<meta name='referrer' content='no-referrer'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>最近對話</title>"
+        "<style>"
+        "*{box-sizing:border-box;margin:0;padding:0}"
+        "body{font-family:system-ui,sans-serif;background:#fdf8f2;color:#3b2a1a;padding:16px}"
+        "h1{font-size:18px;margin-bottom:14px;color:#5c3d1e}"
+        "table{width:100%;border-collapse:collapse;background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.08)}"
+        "th{background:#5c3d1e;color:#fff;padding:10px 8px;font-size:12px;text-align:left}"
+        "td{padding:9px 8px;border-bottom:1px solid #f0e6d3;vertical-align:middle}"
+        "tr:last-child td{border-bottom:none}"
+        "tr:hover{background:#fff8f0}"
+        "</style></head><body>"
+        "<h1>老鄰居豆干絲 · 最近對話</h1>"
+        + inject_banner
+        + "<p style='font-size:12px;color:#888;margin-bottom:12px'>最近 20 個有對話記錄的客人，點選列尾可直接注入記憶。</p>"
+        "<table>"
+        "<thead><tr><th>最後對話</th><th>顯示名稱</th><th>最後訊息</th><th>LINE UID</th><th>注入記憶</th></tr></thead>"
+        f"<tbody>{table_rows}</tbody>"
+        "</table>"
+        f"<p style='margin-top:14px;font-size:12px;color:#aaa'><a href='/orders?token={token}' style='color:#c9a96e'>← 回訂單管理</a></p>"
         "</body></html>"
     )
 
