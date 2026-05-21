@@ -346,22 +346,10 @@ def clear_customer_profile(uid: str):
     _redis(["DEL", f"profile:{uid}"])
 
 def get_customer_profile(uid: str) -> dict:
-    """取得客人資料。優先查 Redis，找不到時用 line_uid 查 Supabase 並回寫 Redis。"""
-    if not UPSTASH_URL:
+    """用 line_uid 直接查 Supabase，Supabase 為唯一真相。"""
+    if not uid:
         return {}
-    raw = _redis(["GET", f"profile:{uid}"])
-    if raw:
-        try:
-            return json.loads(raw)
-        except Exception:
-            pass
-    # Redis 無資料，改用 line_uid 查 Supabase
-    if SUPABASE_URL and uid:
-        p = get_phone_profile_by_uid(uid)
-        if p:
-            _redis(["SET", f"profile:{uid}", json.dumps(p, ensure_ascii=False), "EX", 31536000])
-            return p
-    return {}
+    return get_phone_profile_by_uid(uid)
 
 def get_phone_profile_by_uid(uid: str) -> dict:
     """用 line_uid 查 Supabase customers，回傳與 get_phone_profile 相同格式的 dict。"""
@@ -526,12 +514,51 @@ def _save_order_record(order_type: str, order_info: str, reply_text: str, uid: s
     _redis(["SET", key, json.dumps(record, ensure_ascii=False), "EX", 15552000])
 
 def save_customer_profile(uid: str, profile: dict):
-    """儲存客人資料，TTL 一年，同步更新 phone_profile。老闆 UID 不儲存（測試用）。"""
+    """儲存客人資料至 Supabase（唯一真相）。
+    - 遮罩資料（含 *）自動略過，不覆蓋現有資料。
+    - 回訪客人：只更新有變動的欄位 + 綁定 line_uid。
+    - 全新客人：完整寫入。"""
     if uid and OWNER_LINE_UID and uid == OWNER_LINE_UID:
         return
-    _redis(["SET", f"profile:{uid}", json.dumps(profile, ensure_ascii=False), "EX", 31536000])
-    if profile.get("phone"):
-        save_phone_profile(profile["phone"], profile)
+
+    # 過濾遮罩資料
+    name  = profile.get("name", "").strip()
+    phone = profile.get("phone", "").strip()
+    addr  = profile.get("address", "").strip()
+    if '*' in name:  name = ""
+    if '*' in phone: phone = ""
+    if '*' in addr:  addr = ""
+
+    if not phone and not uid:
+        return
+
+    # 查現有資料
+    existing = get_customer_profile(uid) if uid else {}
+    if not existing and phone:
+        existing = get_phone_profile(phone) or {}
+
+    if existing:
+        # 回訪客人：只更新有變動的欄位，line_uid 一律補綁
+        update = {"updated_at": datetime.now(_TZ_TW).isoformat()}
+        if uid:
+            update["line_uid"] = uid
+        if name and name != existing.get("name", ""):
+            update["name"] = name
+        ex_phone = existing.get("phone", "")
+        p = ex_phone or phone
+        _supa_upsert("customers", {"phone": p, **update})
+        # 地址有變動才新增（自取不傳 addr，不影響現有地址）
+        if addr and addr != existing.get("address", ""):
+            existing_addrs = [a.get("address", "") for a in _supa_get_addresses(p)]
+            if addr not in existing_addrs:
+                _supa_upsert("addresses", {
+                    "phone": p, "address": addr,
+                    "label": "預設", "is_default": not bool(existing_addrs),
+                })
+    else:
+        # 全新客人：完整寫入
+        if phone:
+            save_phone_profile(phone, {"name": name, "phone": phone, "address": addr, "line_uid": uid})
 
 def customer_profile_text(uid: str, current_msg: str = "") -> str:
     """回傳客人資料提示，供每次呼叫 Claude 時動態注入。
@@ -548,7 +575,13 @@ def customer_profile_text(uid: str, current_msg: str = "") -> str:
         if phone_match:
             p = get_phone_profile(phone_match.group())
             if p:
-                save_customer_profile(uid, p)  # 升級綁定 UID
+                # 只補綁 line_uid，不覆蓋其他資料
+                if uid and not p.get("line_uid"):
+                    _supa_upsert("customers", {
+                        "phone": p["phone"],
+                        "line_uid": uid,
+                        "updated_at": datetime.now(_TZ_TW).isoformat(),
+                    })
 
     if not p:
         return ""
