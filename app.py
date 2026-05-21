@@ -516,6 +516,12 @@ def _save_order_record(order_type: str, order_info: str, reply_text: str, uid: s
             "items":       parts[3] if len(parts) > 3 else "",
             "time":        now_tw.strftime("%Y-%m-%d %H:%M"),
         }
+    # 防重複：同電話+品項+出貨日/取貨時間，10分鐘內只寫一筆
+    dedup_str = f"{record.get('phone','')}|{record.get('items','')}|{record.get('ship_date','') or record.get('pickup_time','')}"
+    dedup_key = "order_dedup:" + hashlib.md5(dedup_str.encode()).hexdigest()
+    if _redis(["SET", dedup_key, "1", "NX", "EX", 600]) is None:
+        print(f"[ORDER_DEDUP] 重複訂單略過 {dedup_str[:60]}")
+        return
     key = f"order:{ts}:{order_type}"
     _redis(["SET", key, json.dumps(record, ensure_ascii=False), "EX", 15552000])
 
