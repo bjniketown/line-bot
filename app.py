@@ -2662,6 +2662,23 @@ def customers_admin():
 
     from flask import Response
 
+    # 刪除客戶
+    if request.args.get("action") == "delete":
+        phone = request.args.get("phone", "").strip()
+        from flask import redirect
+        if phone and SUPABASE_URL:
+            requests.delete(
+                f"{SUPABASE_URL}/rest/v1/customers?phone=eq.{phone}",
+                headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+                timeout=5,
+            )
+            requests.delete(
+                f"{SUPABASE_URL}/rest/v1/addresses?phone=eq.{phone}",
+                headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+                timeout=5,
+            )
+        return redirect(f"/customers?token={token}&q={request.args.get('q','')}")
+
     # 更新備註 / LINE UID
     if request.method == "POST":
         phone = request.form.get("phone", "").strip()
@@ -2941,6 +2958,10 @@ tr:last-child td{border-bottom:none}.crow:hover td{background:#fdf3e7}
         <input type='text' name='line_uid' id='sf-uid' placeholder='LINE UID（未綁定時填入）' style='margin-top:6px'>
         <button type='submit'>儲存備註 / UID</button>
       </form>
+      <div style='margin-top:10px;border-top:1px solid #f0e8da;padding-top:10px'>
+        <a id='del-btn' href='#' onclick='return confirmDelete()'
+           style='color:#c0392b;font-size:12px;text-decoration:none'>🗑 刪除此客戶資料</a>
+      </div>
     </div>
   </div>
 </div>"""
@@ -2965,9 +2986,17 @@ function openModal(idx) {{
   document.getElementById('sf-notes').value = d.notes || '';
   document.getElementById('sf-uid').value = d.line_uid || '';
   document.getElementById('save-form').action = `/customers?token=${{TOKEN}}`;
+  document.getElementById('del-btn').dataset.phone = d.phone;
   document.getElementById('overlay').classList.add('show');
 }}
 function closeModal() {{ document.getElementById('overlay').classList.remove('show'); }}
+function confirmDelete() {{
+  const phone = document.getElementById('del-btn').dataset.phone;
+  if (!phone) return false;
+  if (!confirm(`確定刪除「${{phone}}」的客戶資料？此操作無法復原。`)) return false;
+  window.location.href = `/customers?token=${{TOKEN}}&action=delete&phone=${{encodeURIComponent(phone)}}`;
+  return false;
+}}
 document.getElementById('overlay').addEventListener('click', function(e){{ if(e.target===this) closeModal(); }});
 document.querySelectorAll('.crow').forEach(tr => {{
   tr.addEventListener('click', () => openModal(+tr.dataset.idx));
