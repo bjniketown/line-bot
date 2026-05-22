@@ -2356,16 +2356,52 @@ def webhook():
                 reply(token, rule)
                 continue
 
-            # ── Claude 呼叫 → 快慢分路 ──────────────────────────────────────
+            # ── Claude 呼叫 → debounce 合併分段訊息 ─────────────────────────
             if not _daily_allowed(uid):
                 reply(token, "您今日的詢問次數已達上限，請明天再試，或直撥 04-25882881 😊")
                 continue
-            threading.Thread(
-                target=_handle_claude,
-                args=(token, uid, text),
-                daemon=True,
-            ).start()
+
+            if len(text) <= 15:
+                # 短訊息：加入 pending 佇列等待合併
+                raw = _redis(["GET", f"pending:{uid}"]) or "[]"
+                try:
+                    pending = json.loads(raw)
+                except Exception:
+                    pending = []
+                pending.append({"text": text, "token": token})
+                _redis(["SET", f"pending:{uid}", json.dumps(pending, ensure_ascii=False), "EX", 30])
+                seq = int(_redis(["INCR", f"debounce_seq:{uid}"]) or 1)
+                _redis(["EXPIRE", f"debounce_seq:{uid}", 30])
+                threading.Thread(target=_debounce_worker, args=(uid, seq), daemon=True).start()
+            else:
+                # 長訊息：清掉舊的 pending，直接處理
+                _redis(["DEL", f"pending:{uid}"])
+                _redis(["DEL", f"debounce_seq:{uid}"])
+                threading.Thread(target=_handle_claude, args=(token, uid, text), daemon=True).start()
     return "OK"
+
+
+_DEBOUNCE_SECS = 2.5
+
+def _debounce_worker(uid: str, seq: int):
+    """等待 _DEBOUNCE_SECS 秒後，若序號未變則合併所有 pending 訊息一起處理。"""
+    time.sleep(_DEBOUNCE_SECS)
+    current_seq = _redis(["GET", f"debounce_seq:{uid}"])
+    if current_seq is None or int(current_seq) != seq:
+        return  # 有新訊息進來，由新的 worker 負責
+    raw = _redis(["GET", f"pending:{uid}"]) or "[]"
+    try:
+        pending = json.loads(raw)
+    except Exception:
+        return
+    if not pending:
+        return
+    _redis(["DEL", f"pending:{uid}"])
+    _redis(["DEL", f"debounce_seq:{uid}"])
+    last_token = pending[-1]["token"]
+    combined_text = "\n".join(p["text"] for p in pending)
+    print(f"[DEBOUNCE] uid={uid} merged={len(pending)}則 text={combined_text[:80]}")
+    _handle_claude(last_token, uid, combined_text)
 
 
 @app.route("/ping")
