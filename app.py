@@ -482,7 +482,7 @@ def _mask_address(address: str) -> str:
         return f"{prefix}****{suffix}"
     return address[:4] + '****'
 
-def _save_order_record(order_type: str, order_info: str, reply_text: str, uid: str = ""):
+def _save_order_record(order_type: str, order_info: str, reply_text: str, uid: str = "", modify: bool = False):
     """將成立的訂單存入 Redis，key = order:{timestamp}:{type}，TTL 180 天。
     優先使用 Redis 完整客戶資料，避免存入 Claude 產生的遮罩版本。"""
     now_tw = datetime.now(_TZ_TW)
@@ -520,14 +520,25 @@ def _save_order_record(order_type: str, order_info: str, reply_text: str, uid: s
             "items":       parts[3] if len(parts) > 3 else "",
             "time":        now_tw.strftime("%Y-%m-%d %H:%M"),
         }
-    # 防重複：同電話+品項+出貨日/取貨時間，10分鐘內只寫一筆
-    dedup_str = f"{record.get('phone','')}|{record.get('items','')}|{record.get('ship_date','') or record.get('pickup_time','')}"
-    dedup_key = "order_dedup:" + hashlib.md5(dedup_str.encode()).hexdigest()
-    if _redis(["SET", dedup_key, "1", "NX", "EX", 600]) is None:
-        print(f"[ORDER_DEDUP] 重複訂單略過 {dedup_str[:60]}")
-        return
+    phone = record.get("phone", "")
+    # 修改模式：先刪同電話的舊訂單，再存新的
+    if modify and phone:
+        old_key = _redis(["GET", f"active_order:{phone}"])
+        if old_key:
+            _redis(["DEL", old_key])
+            print(f"[MODIFY] 刪除舊訂單 {old_key}")
+    # 防重複：同電話+品項+出貨日/取貨時間，10分鐘內只寫一筆（修改模式跳過）
+    if not modify:
+        dedup_str = f"{phone}|{record.get('items','')}|{record.get('ship_date','') or record.get('pickup_time','')}"
+        dedup_key = "order_dedup:" + hashlib.md5(dedup_str.encode()).hexdigest()
+        if _redis(["SET", dedup_key, "1", "NX", "EX", 600]) is None:
+            print(f"[ORDER_DEDUP] 重複訂單略過 {dedup_str[:60]}")
+            return
     key = f"order:{ts}:{order_type}"
     _redis(["SET", key, json.dumps(record, ensure_ascii=False), "EX", 15552000])
+    # 記錄此電話最新訂單 key（供下次 MODIFY 使用）
+    if phone:
+        _redis(["SET", f"active_order:{phone}", key, "EX", 15552000])
 
 def save_customer_profile(uid: str, profile: dict):
     """儲存客人資料至 Supabase（唯一真相）。
@@ -1221,7 +1232,9 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
       - 客人購買一般包裝 3 包時，主動告知「4 包以上醬料獨立包裝，方便保存，是否要多帶一包？」
       - ⚠️ 說明醬料規則時，必須依照客人實際訂購數量套用正確規則。訂購 10 包→套用「4 包以上」規則，絕對不可套用「1–3 包」規則。
     ▸ 真空包裝（固定）：本身即真空封裝，附蒜泥水＋辣油調料包，不附蔥花（食品法規），無論幾包規則相同
-18. 【訂單追加／修改】客人在訂單成立後說「追加」「再加」「多加」「改成」「修改」等，直接將變動套用至原訂單，重新列出完整最新品項明細與總金額，並重新輸出 <<PICKUP>> 或 <<ORDER>> 標記（視原訂單類型），視為訂單更新取代舊訂單。
+18. 【訂單追加／修改】客人在訂單成立後說「追加」「再加」「多加」「改成」「修改」「改日期」「改地址」等，直接將變動套用至原訂單，重新列出完整最新品項明細與總金額。
+    - 修改現有訂單：輸出 <<MODIFY_ORDER:...>> 或 <<MODIFY_PICKUP:...>>（格式與 ORDER/PICKUP 相同），系統會自動刪除舊訂單並儲存新訂單。
+    - 全新獨立訂單（客人明確說「另一筆」「再訂一單」「不同地址的另一筆」）：輸出原本的 <<ORDER:...>> 或 <<PICKUP:...>>，系統會保留舊訂單並新增。
     - 禁止重新詢問「門市自取還是宅配」「姓名電話地址」等已知資料，直接沿用對話中已確認的資訊。
     - 重新輸出標記時，必須同步更新 <<CALC>> 內的品項與數量，確保金額由系統重新計算。
     - 例：原訂「豆干絲一般35包+真空6包」→ 客人說「追加一般包10包」→ 直接更新為「一般45包+真空6包」，重新列出明細與 <<CALC>>、<<PICKUP>> 標記。
@@ -1412,20 +1425,28 @@ class LRUCache:
 
 faq_cache = LRUCache(maxsize=500)  # 全域問答快取：normalized 問句 → Claude 回答
 
-ORDER_TAG  = re.compile(r'<<ORDER:([^>]+)>>',  re.IGNORECASE)
-PICKUP_TAG = re.compile(r'<<PICKUP:([^>]+)>>', re.IGNORECASE)
+ORDER_TAG   = re.compile(r'<<ORDER:([^>]+)>>',   re.IGNORECASE)
+PICKUP_TAG  = re.compile(r'<<PICKUP:([^>]+)>>',  re.IGNORECASE)
+MODIFY_ORDER_TAG  = re.compile(r'<<MODIFY_ORDER:([^>]+)>>',  re.IGNORECASE)
+MODIFY_PICKUP_TAG = re.compile(r'<<MODIFY_PICKUP:([^>]+)>>', re.IGNORECASE)
 
 
 def extract_order(text):
-    """從 Claude 回應中取出訂單/取貨標記，回傳 (乾淨文字, 類型, 摘要)。
+    """從 Claude 回應中取出訂單/取貨標記，回傳 (乾淨文字, 類型, 摘要, is_modify)。
     類型：'order'=宅配, 'pickup'=門市自取, None=無標記"""
+    m = MODIFY_ORDER_TAG.search(text)
+    if m:
+        return MODIFY_ORDER_TAG.sub("", text).strip(), "order", m.group(1).strip(), True
+    m = MODIFY_PICKUP_TAG.search(text)
+    if m:
+        return MODIFY_PICKUP_TAG.sub("", text).strip(), "pickup", m.group(1).strip(), True
     m = ORDER_TAG.search(text)
     if m:
-        return ORDER_TAG.sub("", text).strip(), "order", m.group(1).strip()
+        return ORDER_TAG.sub("", text).strip(), "order", m.group(1).strip(), False
     m = PICKUP_TAG.search(text)
     if m:
-        return PICKUP_TAG.sub("", text).strip(), "pickup", m.group(1).strip()
-    return text, None, None
+        return PICKUP_TAG.sub("", text).strip(), "pickup", m.group(1).strip(), False
+    return text, None, None, False
 
 
 
@@ -2255,7 +2276,7 @@ def ask(uid, msg):
 
     print(f"[RAW] {raw[:300]}")
 
-    clean, order_type, order_info = extract_order(raw)
+    clean, order_type, order_info, is_modify = extract_order(raw)
     clean = inject_reminder(clean)
     clean = validate_ship_recv_date(clean)
     if order_type:
@@ -2289,7 +2310,7 @@ def ask(uid, msg):
                 "phone": parts[1].strip(),
                 "line_uid": uid,
             })
-        _save_order_record(order_type, order_info, clean, uid)
+        _save_order_record(order_type, order_info, clean, uid, modify=is_modify)
 
     history.append(_msg_with_time("assistant", clean))
     set_history(uid, history)
