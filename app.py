@@ -1431,7 +1431,7 @@ _REMINDER_STRIP_RE   = re.compile(r'\n?\*{0,2}💡\s*小提醒[：:][^\n]*\*{0,2
 # ── Python-side 總金額校正（Claude 算術不可靠，由 Python 重算）────────────
 CALC_TAG = re.compile(r'<<CALC:([^>]+)>>', re.IGNORECASE)
 _TOTAL_REPLACE_RE = re.compile(
-    r'((?:總金額|總計|金額合計)[：:]\*{0,2}\s*)[\d,，\+\s\d×x]*?(\d[\d,，]*)(\s*元)'
+    r'(\*{0,2}(?:總金額|總計|金額合計)[：:]\*{0,2}\s*)[\d,，\+\s\d×x]*?(\d[\d,，]*)(\s*元\*{0,2})'
 )
 # 格式 1：品名 N 包（X 元/包）
 _ORDER_ITEM_RE = re.compile(
