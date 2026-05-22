@@ -499,8 +499,15 @@ def _save_order_record(order_type: str, order_info: str, reply_text: str, uid: s
         norm = normalize_phone(raw_phone)
         full = get_phone_profile(norm)
 
+    _FAKE_ADDR = {"系統已記錄", "已記錄", "同上", "同前", "同之前"}
     def _full(field, fallback):
-        return full.get(field, "") or fallback
+        val = full.get(field, "") or ""
+        if val:
+            return val
+        # 地址欄位：過濾掉 Claude 填的假文字，改用 Supabase 真實地址
+        if field == "address" and fallback.strip() in _FAKE_ADDR:
+            return full.get("address", "") or ""
+        return fallback
 
     if order_type == "order":
         record = {
@@ -528,9 +535,10 @@ def _save_order_record(order_type: str, order_info: str, reply_text: str, uid: s
         if old_key:
             _redis(["DEL", old_key])
             print(f"[MODIFY] 刪除舊訂單 {old_key}")
-    # 防重複：同電話+品項+出貨日/取貨時間，10分鐘內只寫一筆（修改模式跳過）
+    # 防重複：同電話+出貨日/取貨時間，10分鐘內只寫一筆（修改模式跳過）
+    # 不含 items，避免同人同日不同品項被誤擋；不同出貨日視為獨立訂單
     if not modify:
-        dedup_str = f"{phone}|{record.get('items','')}|{record.get('ship_date','') or record.get('pickup_time','')}"
+        dedup_str = f"{phone}|{record.get('ship_date','') or record.get('pickup_time','')}"
         dedup_key = "order_dedup:" + hashlib.md5(dedup_str.encode()).hexdigest()
         if _redis(["SET", dedup_key, "1", "NX", "EX", 600]) is None:
             print(f"[ORDER_DEDUP] 重複訂單略過 {dedup_str[:60]}")
