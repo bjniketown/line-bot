@@ -483,6 +483,23 @@ def clear_has_order(uid: str):
     """清除訂單旗標（配合清除記憶使用）。"""
     _redis(["DEL", f"has_order:{uid}"])
 
+# 修改意圖關鍵詞
+_MODIFY_INTENT_RE = re.compile(
+    r'改(時間|日期|地址|成|一下|取貨|出貨)|換(時間|成)|'
+    r'換個時間|改個時間|不要.*改|取消.*改|修改訂單|改訂單'
+)
+
+def set_pending_modify(uid: str, order_type: str):
+    """記錄客人有修改意圖，下一則訊息若成立訂單自動轉為 MODIFY（TTL 10分鐘）"""
+    _redis(["SET", f"pending_modify:{uid}", order_type, "EX", 600])
+
+def get_pending_modify(uid: str) -> str:
+    """取得待確認的修改類型（'order'/'pickup'/'1' 或 None）"""
+    return _redis(["GET", f"pending_modify:{uid}"]) or ""
+
+def clear_pending_modify(uid: str):
+    _redis(["DEL", f"pending_modify:{uid}"])
+
 def clear_customer_profile(uid: str):
     """清除客人資料（姓名、電話、地址）。"""
     _redis(["DEL", f"profile:{uid}"])
@@ -705,12 +722,14 @@ def _save_order_record(order_type: str, order_info: str, reply_text: str, uid: s
         if modify:
             # 修改模式：刪除同電話最新一筆再新增
             try:
+                # 修改模式：刪除此電話所有訂單（避免重複累積影響標籤分析）
                 requests.delete(
                     f"{SUPABASE_URL}/rest/v1/orders",
                     headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
-                    params={"phone": f"eq.{phone}", "order": "created_at.desc", "limit": "1"},
+                    params={"phone": f"eq.{phone}"},
                     timeout=5,
                 )
+                print(f"[SUPA_ORDER_DEL] 已刪除 {phone} 所有舊訂單")
             except Exception as e:
                 print(f"[SUPA_ORDER_DEL] {e}")
         try:
@@ -2488,6 +2507,19 @@ def ask(uid, msg):
     print(f"[RAW] {raw[:300]}")
 
     clean, order_type, order_info, is_modify = extract_order(raw)
+
+    # 若客人有修改意圖且 Claude 輸出了 PICKUP/ORDER（非 MODIFY），Python 強制轉成 MODIFY
+    pending_mod = get_pending_modify(uid)
+    if order_info and not is_modify and pending_mod:
+        print(f"[PENDING_MODIFY] 強制轉換 {order_type} → MODIFY_{order_type.upper()}")
+        is_modify = True
+        clear_pending_modify(uid)
+    # 偵測客人是否有修改意圖（已成立訂單的情況下）
+    if get_has_order(uid) and _MODIFY_INTENT_RE.search(msg):
+        # 取得目前訂單類型（從 active_order 推斷）
+        mod_type = "pickup"  # 預設自取，有宅配 active_order 才改
+        set_pending_modify(uid, mod_type)
+        print(f"[PENDING_MODIFY] 偵測到修改意圖，設定 pending_modify={mod_type}")
     clean = inject_reminder(clean)
     clean = validate_ship_recv_date(clean)
     if order_type:
