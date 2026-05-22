@@ -483,8 +483,9 @@ def _mask_address(address: str) -> str:
     return address[:4] + '****'
 
 def _save_order_record(order_type: str, order_info: str, reply_text: str, uid: str = "", modify: bool = False):
-    """將成立的訂單存入 Redis，key = order:{timestamp}:{type}，TTL 180 天。
-    優先使用 Redis 完整客戶資料，避免存入 Claude 產生的遮罩版本。"""
+    """將成立的訂單存入 Redis 與 Supabase。
+    Redis：key = order:{timestamp}:{type}，TTL 180 天。
+    Supabase orders 表：永久保存，供標籤分析與歷史查詢使用。"""
     now_tw = datetime.now(_TZ_TW)
     ts = now_tw.strftime("%Y%m%d%H%M%S")
     parts = [p.strip() for p in order_info.split("|")]
@@ -539,6 +540,39 @@ def _save_order_record(order_type: str, order_info: str, reply_text: str, uid: s
     # 記錄此電話最新訂單 key（供下次 MODIFY 使用）
     if phone:
         _redis(["SET", f"active_order:{phone}", key, "EX", 15552000])
+    # 同步寫入 Supabase（永久保存）
+    if SUPABASE_URL and phone:
+        supa_record = {
+            "phone":       phone,
+            "name":        record.get("name", ""),
+            "order_type":  record.get("type", ""),
+            "items":       record.get("items", ""),
+            "ship_date":   record.get("ship_date") or None,
+            "pickup_time": record.get("pickup_time") or None,
+            "address":     record.get("address", ""),
+            "created_at":  now_tw.isoformat(),
+        }
+        if modify:
+            # 修改模式：刪除同電話最新一筆再新增
+            try:
+                requests.delete(
+                    f"{SUPABASE_URL}/rest/v1/orders",
+                    headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+                    params={"phone": f"eq.{phone}", "order": "created_at.desc", "limit": "1"},
+                    timeout=5,
+                )
+            except Exception as e:
+                print(f"[SUPA_ORDER_DEL] {e}")
+        try:
+            requests.post(
+                f"{SUPABASE_URL}/rest/v1/orders",
+                headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
+                         "Content-Type": "application/json", "Prefer": "return=minimal"},
+                json=supa_record, timeout=5,
+            )
+            print(f"[SUPA_ORDER] 已寫入 {phone} {record.get('type')} {record.get('ship_date') or record.get('pickup_time','')}")
+        except Exception as e:
+            print(f"[SUPA_ORDER_ERR] {e}")
 
 def save_customer_profile(uid: str, profile: dict):
     """儲存客人資料至 Supabase（唯一真相）。
