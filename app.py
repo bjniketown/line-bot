@@ -2394,7 +2394,7 @@ def webhook():
     return "OK"
 
 
-_DEBOUNCE_SECS = 2.5
+_DEBOUNCE_SECS = 5.0
 
 def _debounce_worker(uid: str, seq: int):
     """等待 _DEBOUNCE_SECS 秒後，若序號未變則合併所有 pending 訊息一起處理。"""
