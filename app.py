@@ -3009,7 +3009,7 @@ def customers_admin():
     sorted_tags = [t for t in TAG_ORDER if t in all_tag_labels]
     TAG_COLORS = {"全新宅配":"#1976d2","全新自取":"#388e3c","舊客宅配":"#e65100","舊客自取":"#7b1fa2","週回購":"#c62828","月回購":"#ef6c00","年回購":"#546e7a"}
     filter_bar_html = "".join(
-        f"<button class='ftag' data-tag='{t}' style='--ac:{TAG_COLORS.get(t,\"#888\")}'>{t}</button>"
+        "<button class='ftag' data-tag='" + t + "' style='--ac:" + TAG_COLORS.get(t, "#888") + "'>" + t + "</button>"
         for t in sorted_tags
     )
 
