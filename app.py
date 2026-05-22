@@ -2380,23 +2380,17 @@ def webhook():
                 reply(token, "您今日的詢問次數已達上限，請明天再試，或直撥 04-25882881 😊")
                 continue
 
-            if len(text) <= 15:
-                # 短訊息：加入 pending 佇列等待合併
-                raw = _redis(["GET", f"pending:{uid}"]) or "[]"
-                try:
-                    pending = json.loads(raw)
-                except Exception:
-                    pending = []
-                pending.append({"text": text, "token": token})
-                _redis(["SET", f"pending:{uid}", json.dumps(pending, ensure_ascii=False), "EX", 30])
-                seq = int(_redis(["INCR", f"debounce_seq:{uid}"]) or 1)
-                _redis(["EXPIRE", f"debounce_seq:{uid}", 30])
-                threading.Thread(target=_debounce_worker, args=(uid, seq), daemon=True).start()
-            else:
-                # 長訊息：清掉舊的 pending，直接處理
-                _redis(["DEL", f"pending:{uid}"])
-                _redis(["DEL", f"debounce_seq:{uid}"])
-                threading.Thread(target=_handle_claude, args=(token, uid, text), daemon=True).start()
+            # 所有訊息一律 debounce 2.5 秒，等待分段訊息合併
+            raw = _redis(["GET", f"pending:{uid}"]) or "[]"
+            try:
+                pending = json.loads(raw)
+            except Exception:
+                pending = []
+            pending.append({"text": text, "token": token})
+            _redis(["SET", f"pending:{uid}", json.dumps(pending, ensure_ascii=False), "EX", 30])
+            seq = int(_redis(["INCR", f"debounce_seq:{uid}"]) or 1)
+            _redis(["EXPIRE", f"debounce_seq:{uid}", 30])
+            threading.Thread(target=_debounce_worker, args=(uid, seq), daemon=True).start()
     return "OK"
 
 
