@@ -228,6 +228,48 @@ def _get_personality(uid: str) -> str:
         pass
     return ""
 
+def _fetch_and_save_line_profile(uid: str):
+    """呼叫 LINE API 取得顯示名稱和頭像，存入 Supabase customers（背景執行）"""
+    if not uid or not SUPABASE_URL:
+        return
+    try:
+        r = requests.get(
+            f"https://api.line.me/v2/bot/profile/{uid}",
+            headers={"Authorization": f"Bearer {LINE_TOKEN}"},
+            timeout=5,
+        )
+        if not r.ok:
+            return
+        data = r.json()
+        display_name = data.get("displayName", "")
+        picture_url  = data.get("pictureUrl", "")
+        if not display_name:
+            return
+        # 只更新 display_name 和 picture_url，不影響其他欄位
+        # 先確認客人是否已在 customers 表
+        exist = _supa_get("customers", {"line_uid": uid})
+        if exist:
+            requests.patch(
+                f"{SUPABASE_URL}/rest/v1/customers?line_uid=eq.{uid}",
+                headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
+                         "Content-Type": "application/json"},
+                json={"display_name": display_name, "picture_url": picture_url},
+                timeout=5,
+            )
+        else:
+            # 尚未建檔的客人，建立最基本記錄
+            requests.post(
+                f"{SUPABASE_URL}/rest/v1/customers",
+                headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
+                         "Content-Type": "application/json", "Prefer": "return=minimal"},
+                json={"line_uid": uid, "display_name": display_name,
+                      "picture_url": picture_url, "phone": f"line_{uid[:12]}"},
+                timeout=5,
+            )
+        print(f"[LINE_PROFILE] uid={uid[:8]} name={display_name}")
+    except Exception as e:
+        print(f"[LINE_PROFILE_ERR] {e}")
+
 
 def _fetch_qr_code_url():
     """啟動時從 LINE API 取得官方帳號 QR code 網址"""
@@ -2409,6 +2451,8 @@ def ask(uid, msg):
     if _is_meaningful_message(msg):
         threading.Thread(target=_save_chat_log, args=(uid, "user", msg), daemon=True).start()
         threading.Thread(target=_maybe_analyze_personality, args=(uid,), daemon=True).start()
+    # 每次對話都更新 LINE 名稱和頭像（背景執行）
+    threading.Thread(target=_fetch_and_save_line_profile, args=(uid,), daemon=True).start()
     history = get_history(uid)
     history.append(_msg_with_time("user", msg))
     history = history[-10:]
@@ -3138,7 +3182,9 @@ def customers_admin():
         address  = addrs[0] if addrs else ""
         notes    = p.get("notes", "") or ""
         updated  = (p.get("updated_at", "") or "")[:10]
-        line_uid = p.get("line_uid", "") or ""
+        line_uid     = p.get("line_uid", "") or ""
+        display_name = p.get("display_name", "") or ""
+        picture_url  = p.get("picture_url", "") or ""
         tags = _customer_tags(phone)
         om = order_map.get(normalize_phone(phone), {})
         last_date = om.get("last_date", "")
@@ -3160,14 +3206,22 @@ def customers_admin():
             "addrs": addrs, "notes": notes, "line_uid": line_uid,
             "tag": tag_text_combined, "last_date": last_date,
             "orders": orders_for_modal,
+            "display_name": display_name, "picture_url": picture_url,
         })
+
+        avatar_html = f"<img src='{picture_url}' style='width:40px;height:40px;border-radius:50%;object-fit:cover;flex-shrink:0'>" if picture_url else f"<div style='width:40px;height:40px;border-radius:50%;background:#e0d0bc;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0'>👤</div>"
+        line_name_html = f"<div style='font-size:11px;color:#1976d2;margin-top:1px'>LINE: {_html.escape(display_name)}</div>" if display_name else ""
 
         cards_html += f"""
 <div class='card' data-idx='{idx}' data-tags='{_html.escape(tag_text_combined)}'>
   <div class='card-top'>
-    <div>
-      <div class='card-name'>{_html.escape(name) or '（無姓名）'}</div>
-      <div class='card-phone'>{uid_dot}{phone}</div>
+    <div style='display:flex;gap:10px;align-items:center'>
+      {avatar_html}
+      <div>
+        <div class='card-name'>{_html.escape(name) or '（無姓名）'}</div>
+        <div class='card-phone'>{uid_dot}{phone}</div>
+        {line_name_html}
+      </div>
     </div>
     <div style='text-align:right'>{tag_html}</div>
   </div>
@@ -3236,13 +3290,21 @@ input[type=text]{padding:8px 12px;border:1.5px solid #c9a96e;border-radius:8px;f
 <div id='overlay'>
   <div id='modal'>
     <button class='close-btn' onclick='closeModal()'>✕</button>
-    <h2 id='m-name'></h2>
+    <div style='display:flex;gap:12px;align-items:center;margin-bottom:14px'>
+      <img id='m-avatar' src='' style='width:52px;height:52px;border-radius:50%;object-fit:cover;display:none'>
+      <div id='m-avatar-placeholder' style='width:52px;height:52px;border-radius:50%;background:#e0d0bc;display:flex;align-items:center;justify-content:center;font-size:22px'>👤</div>
+      <div>
+        <h2 id='m-name' style='margin:0'></h2>
+        <div id='m-line-name' style='font-size:12px;color:#1976d2;margin-top:2px'></div>
+      </div>
+    </div>
     <div class='mrow'><span class='mlabel'>電話</span><span class='mval' id='m-phone'></span></div>
     <div class='mrow'><span class='mlabel'>標籤</span><span class='mval' id='m-tag'></span></div>
     <div class='mrow'><span class='mlabel'>最後訂單</span><span class='mval' id='m-last'></span></div>
     <div class='mrow'><span class='mlabel'>地址</span><span class='mval' id='m-addr'></span></div>
     <div class='mrow'><span class='mlabel'>LINE UID</span><span class='mval' id='m-uid'></span></div>
     <div class='mrow'><span class='mlabel'>備註</span><span class='mval' id='m-notes'></span></div>
+    <div id='m-personality-row' class='mrow' style='display:none'><span class='mlabel'>人格分析</span><span class='mval' id='m-personality' style='font-size:12px;color:#7b1fa2'></span></div>
     <div style='margin:12px 0 6px;font-size:12px;color:#888;font-weight:bold'>最近訂單記錄</div>
     <div id='m-orders'></div>
     <div style='margin-top:14px'>
@@ -3274,6 +3336,20 @@ function openModal(idx) {{
   document.getElementById('m-addr').innerHTML = (d.addrs && d.addrs.length) ? d.addrs.join('<br>') : '（無）';
   document.getElementById('m-uid').textContent = d.line_uid || '未綁定';
   document.getElementById('m-notes').textContent = d.notes || '—';
+  // 頭像
+  const avatar = document.getElementById('m-avatar');
+  const placeholder = document.getElementById('m-avatar-placeholder');
+  if (d.picture_url) {{
+    avatar.src = d.picture_url; avatar.style.display = 'block';
+    placeholder.style.display = 'none';
+  }} else {{
+    avatar.style.display = 'none'; placeholder.style.display = 'flex';
+  }}
+  // LINE 名稱
+  document.getElementById('m-line-name').textContent = d.display_name ? 'LINE: ' + d.display_name : '';
+  // 人格分析（有資料才顯示）
+  const pRow = document.getElementById('m-personality-row');
+  pRow.style.display = 'none';
   const ob = document.getElementById('m-orders');
   ob.innerHTML = d.orders.length ? d.orders.map(o=>`<div class='order-item'>${{o.date}} ${{o.type}} — ${{o.items}}</div>`).join('') : '<div style="color:#aaa;font-size:12px">無訂單記錄</div>';
   document.getElementById('sf-phone').value = d.phone;
