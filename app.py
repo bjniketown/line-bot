@@ -124,9 +124,109 @@ def _msg_with_time(role: str, content: str) -> dict:
     ts = datetime.now(_TZ_TW).strftime("%Y-%m-%d %H:%M")
     return {"role": role, "content": content, "time": ts}
 
-def _msg_with_time(role: str, content: str) -> dict:
-    ts = datetime.now(_TZ_TW).strftime("%Y-%m-%d %H:%M")
-    return {"role": role, "content": content, "time": ts}
+# Rich menu 固定選項，不存入 chat_logs
+_RICH_MENU_TEXTS = {"查詢訂單", "產品介紹", "門市資訊", "聯絡我們", "優惠活動", "常見問題"}
+
+def _is_meaningful_message(text: str) -> bool:
+    if not text or len(text.strip()) < 5:
+        return False
+    if text.strip() in _RICH_MENU_TEXTS:
+        return False
+    return True
+
+def _save_chat_log(uid: str, role: str, message: str):
+    if not SUPABASE_URL or not uid:
+        return
+    try:
+        requests.post(
+            f"{SUPABASE_URL}/rest/v1/chat_logs",
+            headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
+                     "Content-Type": "application/json", "Prefer": "return=minimal"},
+            json={"uid": uid, "role": role, "message": message,
+                  "created_at": datetime.now(_TZ_TW).isoformat()},
+            timeout=5,
+        )
+    except Exception as e:
+        print(f"[CHAT_LOG_ERR] {e}")
+
+def _count_user_chat_logs(uid: str) -> int:
+    if not SUPABASE_URL:
+        return 0
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/chat_logs",
+            headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
+                     "Prefer": "count=exact"},
+            params={"uid": f"eq.{uid}", "role": "eq.user", "select": "id"},
+            timeout=5,
+        )
+        return int(r.headers.get("content-range", "0/0").split("/")[-1])
+    except Exception:
+        return 0
+
+def _analyze_personality(uid: str):
+    """從 chat_logs 取最近 60 則，呼叫 Claude Haiku 分析人格，結果存入 customer_personality"""
+    if not SUPABASE_URL:
+        return
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/chat_logs",
+            headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+            params={"uid": f"eq.{uid}", "order": "created_at.desc", "limit": "60"},
+            timeout=10,
+        )
+        if not r.ok or not r.json():
+            return
+        logs = list(reversed(r.json()))
+        dialogue = "\n".join(f"[{m['role']}] {m['message']}" for m in logs)
+        prompt = (
+            "以下是一位客人與老鄰居豆干絲客服機器人的真實對話記錄。\n"
+            "請分析此客人的溝通個性，用繁體中文寫出一段 50 字以內的簡短描述，"
+            "供機器人調整對話風格使用。重點放在：話多/話少、決策速度、價格敏感度、語氣偏好。\n"
+            "只輸出描述文字，不要加任何標題或說明。\n\n"
+            f"{dialogue}"
+        )
+        resp = anthropic_client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=150,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        traits = resp.content[0].text.strip()
+        sample_count = len([m for m in logs if m["role"] == "user"])
+        requests.post(
+            f"{SUPABASE_URL}/rest/v1/customer_personality",
+            headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
+                     "Content-Type": "application/json", "Prefer": "resolution=merge-duplicates"},
+            json={"uid": uid, "traits": traits, "sample_count": sample_count,
+                  "analyzed_at": datetime.now(_TZ_TW).isoformat()},
+            timeout=10,
+        )
+        print(f"[PERSONALITY] uid={uid[:8]} sample={sample_count} traits={traits[:40]}")
+    except Exception as e:
+        print(f"[PERSONALITY_ERR] {e}")
+
+def _maybe_analyze_personality(uid: str):
+    """每累積 30 則有效 user 訊息觸發一次人格分析（背景執行）"""
+    count = _count_user_chat_logs(uid)
+    if count > 0 and count % 30 == 0:
+        threading.Thread(target=_analyze_personality, args=(uid,), daemon=True).start()
+
+def _get_personality(uid: str) -> str:
+    """取得此客人的人格描述，供 ask() 動態插入"""
+    if not SUPABASE_URL or not uid:
+        return ""
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/customer_personality",
+            headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+            params={"uid": f"eq.{uid}", "select": "traits", "limit": "1"},
+            timeout=3,
+        )
+        if r.ok and r.json():
+            return r.json()[0].get("traits", "")
+    except Exception:
+        pass
+    return ""
 
 
 def _fetch_qr_code_url():
@@ -2190,8 +2290,11 @@ def _full_date_warning(history: list) -> str:
 def _call_claude(history: list, uid: str = "") -> str:
     """依序嘗試 _MODELS，第一個成功的回傳結果；全部失敗才丟例外。"""
     current_msg = history[-1]["content"] if history and history[-1]["role"] == "user" else ""
+    personality = _get_personality(uid)
+    personality_block = f"【此客人溝通風格】{personality}" if personality else ""
     extras = [s for s in (store_status_text(), dumpling_soldout_text(), chili_soldout_text(),
-                          busy_season_text(), shipping_schedule_text(), customer_profile_text(uid, current_msg)) if s]
+                          busy_season_text(), shipping_schedule_text(), customer_profile_text(uid, current_msg),
+                          personality_block) if s]
     system_blocks = [
         {"type": "text", "text": SYSTEM_TEXT,
          "cache_control": {"type": "ephemeral"}},
@@ -2302,6 +2405,10 @@ def validate_ship_recv_date(text: str) -> str:
 
 def ask(uid, msg):
     """呼叫 Claude，回傳 (乾淨文字, 是否有訂單)。"""
+    # 存有意義的 user 訊息到 chat_logs（背景執行）
+    if _is_meaningful_message(msg):
+        threading.Thread(target=_save_chat_log, args=(uid, "user", msg), daemon=True).start()
+        threading.Thread(target=_maybe_analyze_personality, args=(uid,), daemon=True).start()
     history = get_history(uid)
     history.append(_msg_with_time("user", msg))
     history = history[-10:]
@@ -2366,6 +2473,8 @@ def ask(uid, msg):
 
     history.append(_msg_with_time("assistant", clean))
     set_history(uid, history)
+    # 存 assistant 回覆到 chat_logs（背景執行）
+    threading.Thread(target=_save_chat_log, args=(uid, "assistant", clean), daemon=True).start()
     return clean, bool(order_info)
 
 
