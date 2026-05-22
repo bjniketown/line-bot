@@ -2954,25 +2954,29 @@ def customers_admin():
     # 建立 modal 用的客戶 JSON 資料
     import html as _html
     modal_data = []
-    rows_html = ""
+    cards_html = ""
+    all_tag_labels = []
     for idx, p in enumerate(customers):
         name     = p.get("name", "") or ""
         phone    = p.get("phone", "") or ""
         addrs    = addr_map.get(phone, [])
-        address  = addrs[0] if addrs else "（無）"
-        address2 = addrs[1] if len(addrs) > 1 else ""
+        address  = addrs[0] if addrs else ""
         notes    = p.get("notes", "") or ""
         updated  = (p.get("updated_at", "") or "")[:10]
         line_uid = p.get("line_uid", "") or ""
-        uid_badge = "<span style='color:#4caf50;font-size:11px'>✔ 已綁定</span>" if line_uid else "<span style='color:#ccc;font-size:11px'>未綁定</span>"
         tags = _customer_tags(phone)
         om = order_map.get(normalize_phone(phone), {})
         last_date = om.get("last_date", "")
-        tag_html = " ".join(
-            f"<span style='background:{c};color:#fff;padding:2px 7px;border-radius:10px;font-size:11px;white-space:nowrap'>{t}</span>"
+        tag_html = "".join(
+            f"<span class='tag' style='background:{c}'>{t}</span>"
             for t, c in tags
         )
-        tag_text_combined = " ".join(t for t, _ in tags)
+        tag_keys = [t for t, _ in tags]
+        for t in tag_keys:
+            if t not in all_tag_labels:
+                all_tag_labels.append(t)
+        tag_text_combined = " ".join(tag_keys)
+        uid_dot = f"<span class='uid-dot' style='background:{'#4caf50' if line_uid else '#ddd'}'></span>"
 
         # modal 資料
         orders_for_modal = sorted(om.get("orders", []), key=lambda x: x["date"], reverse=True)[:5]
@@ -2983,31 +2987,58 @@ def customers_admin():
             "orders": orders_for_modal,
         })
 
-        rows_html += f"""
-<tr class='crow' data-idx='{idx}' style='cursor:pointer'>
-  <td>{name}</td>
-  <td>{phone}</td>
-  <td style='font-size:12px'>{address}{"<br><span style='color:#aaa;font-size:11px'>"+address2+"</span>" if address2 else ""}</td>
-  <td style='text-align:center'>{uid_badge}</td>
-  <td>{tag_html}</td>
-  <td style='font-size:11px;color:#999'>{last_date or updated}</td>
-</tr>"""
+        cards_html += f"""
+<div class='card' data-idx='{idx}' data-tags='{_html.escape(tag_text_combined)}'>
+  <div class='card-top'>
+    <div>
+      <div class='card-name'>{_html.escape(name) or '（無姓名）'}</div>
+      <div class='card-phone'>{uid_dot}{phone}</div>
+    </div>
+    <div style='text-align:right'>{tag_html}</div>
+  </div>
+  <div class='card-addr'>{_html.escape(address) if address else '<span style=\"color:#ccc\">無地址</span>'}</div>
+  <div class='card-bottom'>
+    <div class='card-tags'></div>
+    <div class='card-date'>{last_date or updated}</div>
+  </div>
+</div>"""
 
     modal_json = json.dumps(modal_data, ensure_ascii=False)
+    # 標籤篩選列 HTML（依出現順序排列）
+    TAG_ORDER = ["全新宅配","全新自取","舊客宅配","舊客自取","週回購","月回購","年回購"]
+    sorted_tags = [t for t in TAG_ORDER if t in all_tag_labels]
+    TAG_COLORS = {"全新宅配":"#1976d2","全新自取":"#388e3c","舊客宅配":"#e65100","舊客自取":"#7b1fa2","週回購":"#c62828","月回購":"#ef6c00","年回購":"#546e7a"}
+    filter_bar_html = "".join(
+        f"<button class='ftag' data-tag='{t}' style='--ac:{TAG_COLORS.get(t,\"#888\")}'>{t}</button>"
+        for t in sorted_tags
+    )
 
     css = """<style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:system-ui,'Noto Sans TC',sans-serif;background:#fdf8f2;color:#3b2a1a;padding:16px}
-h1{font-size:18px;margin-bottom:12px;color:#5c3d1e}
-.toolbar{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;align-items:center}
-input[type=text]{padding:8px 12px;border:1.5px solid #c9a96e;border-radius:8px;font-size:14px;background:#fffdf8;width:220px}
-.btn{padding:8px 16px;border-radius:8px;border:none;cursor:pointer;font-size:13px;text-decoration:none;display:inline-block}
+body{font-family:system-ui,'Noto Sans TC',sans-serif;background:#fdf8f2;color:#3b2a1a;padding:12px}
+h1{font-size:18px;margin-bottom:10px;color:#5c3d1e}
+.toolbar{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap;align-items:center}
+input[type=text]{padding:8px 12px;border:1.5px solid #c9a96e;border-radius:8px;font-size:14px;background:#fffdf8;width:180px}
+.btn{padding:8px 14px;border-radius:8px;border:none;cursor:pointer;font-size:13px;text-decoration:none;display:inline-block}
 .btn-g{background:#4caf50;color:#fff}.btn-b{background:#2196f3;color:#fff}
 .cnt{font-size:13px;color:#888;margin-left:auto}
-table{width:100%;border-collapse:collapse;background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.08)}
-th{background:#5c3d1e;color:#fff;padding:10px 12px;font-size:13px;text-align:left}
-td{padding:9px 12px;border-bottom:1px solid #f0e8da;font-size:13px;vertical-align:middle}
-tr:last-child td{border-bottom:none}.crow:hover td{background:#fdf3e7}
+/* 標籤篩選列 */
+.filter-bar{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}
+.ftag{padding:5px 12px;border-radius:20px;border:1.5px solid #c9a96e;background:#fff;font-size:12px;cursor:pointer;color:#5c3d1e;transition:all .15s}
+.ftag.active{color:#fff;border-color:transparent}
+/* 卡片格線 */
+.card-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:10px}
+.card{background:#fff;border-radius:12px;padding:14px 16px;box-shadow:0 1px 4px rgba(0,0,0,.08);cursor:pointer;transition:box-shadow .15s}
+.card:hover{box-shadow:0 3px 10px rgba(0,0,0,.13)}
+.card-top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px}
+.card-name{font-size:15px;font-weight:600;color:#3b2a1a}
+.card-phone{font-size:12px;color:#888;margin-top:2px}
+.card-addr{font-size:12px;color:#666;margin:5px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card-bottom{display:flex;justify-content:space-between;align-items:center;margin-top:8px}
+.card-tags{display:flex;gap:4px;flex-wrap:wrap}
+.tag{padding:2px 8px;border-radius:10px;font-size:11px;color:#fff;white-space:nowrap}
+.card-date{font-size:11px;color:#aaa}
+.uid-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:4px}
 /* modal */
 #overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:100;align-items:center;justify-content:center}
 #overlay.show{display:flex}
@@ -3020,6 +3051,10 @@ tr:last-child td{border-bottom:none}.crow:hover td{background:#fdf3e7}
 .order-item{background:#fdf8f2;border-radius:8px;padding:8px 10px;margin-bottom:6px;font-size:12px}
 .save-form input{padding:6px 10px;border:1px solid #c9a96e;border-radius:7px;font-size:13px;width:100%}
 .save-form button{margin-top:8px;padding:8px 18px;background:#5c3d1e;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:13px}
+@media(max-width:480px){
+  input[type=text]{width:140px}
+  .card-grid{grid-template-columns:1fr}
+}
 </style>"""
 
     modal_html = """
@@ -3059,7 +3094,7 @@ function openModal(idx) {{
   const d = MDATA[idx];
   document.getElementById('m-name').textContent = d.name || '（無姓名）';
   document.getElementById('m-phone').textContent = d.phone;
-  document.getElementById('m-tag').innerHTML = d.tag ? `<span style='background:#888;color:#fff;padding:2px 8px;border-radius:10px'>${{d.tag}}</span>` : '—';
+  document.getElementById('m-tag').textContent = d.tag || '—';
   document.getElementById('m-last').textContent = d.last_date || '—';
   document.getElementById('m-addr').innerHTML = (d.addrs && d.addrs.length) ? d.addrs.join('<br>') : '（無）';
   document.getElementById('m-uid').textContent = d.line_uid || '未綁定';
@@ -3083,8 +3118,33 @@ function confirmDelete() {{
   return false;
 }}
 document.getElementById('overlay').addEventListener('click', function(e){{ if(e.target===this) closeModal(); }});
-document.querySelectorAll('.crow').forEach(tr => {{
-  tr.addEventListener('click', () => openModal(+tr.dataset.idx));
+// 卡片點擊
+document.querySelectorAll('.card').forEach(card => {{
+  card.addEventListener('click', () => openModal(+card.dataset.idx));
+}});
+// 標籤篩選
+let activeTag = '';
+document.querySelectorAll('.ftag').forEach(btn => {{
+  btn.style.setProperty('--ac', btn.style.getPropertyValue('--ac') || '#888');
+  btn.addEventListener('click', () => {{
+    const t = btn.dataset.tag;
+    if (activeTag === t) {{
+      activeTag = '';
+      document.querySelectorAll('.ftag').forEach(b => b.classList.remove('active'));
+    }} else {{
+      activeTag = t;
+      document.querySelectorAll('.ftag').forEach(b => {{
+        b.classList.toggle('active', b.dataset.tag === t);
+        if (b.classList.contains('active')) b.style.background = b.style.getPropertyValue('--ac') || getComputedStyle(b).getPropertyValue('--ac');
+        else b.style.background = '';
+      }});
+    }}
+    document.querySelectorAll('.card').forEach(card => {{
+      const tags = card.dataset.tags || '';
+      card.style.display = (!activeTag || tags.includes(activeTag)) ? '' : 'none';
+    }});
+    document.getElementById('visible-cnt').textContent = [...document.querySelectorAll('.card')].filter(c=>c.style.display!=='none').length;
+  }});
 }});
 </script>"""
 
@@ -3104,12 +3164,10 @@ document.querySelectorAll('.crow').forEach(tr => {{
         f"<button class='btn btn-b' type='submit'>搜尋</button>"
         f"</form>"
         f"<a class='btn btn-g' href='/customers?token={token}&action=export'>匯出 CSV</a>"
-        f"<span class='cnt'>顯示 {total} 筆</span>"
+        f"<span class='cnt'>顯示 <span id='visible-cnt'>{total}</span> 筆</span>"
         f"</div>"
-        f"<table>"
-        f"<thead><tr><th>姓名</th><th>電話</th><th>地址</th><th>LINE</th><th>標籤</th><th>最後訂單</th></tr></thead>"
-        f"<tbody>{rows_html}</tbody>"
-        f"</table>"
+        + (f"<div class='filter-bar'>{filter_bar_html}</div>" if filter_bar_html else "") +
+        f"<div class='card-grid'>{cards_html}</div>"
         + script +
         f"</body></html>"
     )
