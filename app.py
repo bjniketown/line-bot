@@ -2915,41 +2915,34 @@ def customers_admin():
         pass
 
     def _customer_tags(phone):
-        """回傳 [(label, color), ...] 最多兩個標籤：客人類型 + 回購頻率。"""
+        """回傳 [(label, color), ...] 行動導向標籤：忠實客／沉睡客／單次客／過客"""
         om = order_map.get(normalize_phone(phone), {})
         count = om.get("count", 0)
-        last_type = om.get("last_type", "")
+        last_date_str = om.get("last_date", "")
         if count == 0:
             return []
-        kind = "宅配" if "宅" in last_type else "自取"
-        tags = []
-        # 標籤1：客人類型
-        if count == 1:
-            color = "#1976d2" if kind == "宅配" else "#388e3c"
-            tags.append((f"全新{kind}", color))
-        else:
-            color = "#e65100" if kind == "宅配" else "#7b1fa2"
-            tags.append((f"舊客{kind}", color))
-        # 標籤2：回購頻率（取最近兩筆訂單日期差）
-        if count >= 2:
-            dates = sorted(
-                [o["date"] for o in om.get("orders", []) if o.get("date")],
-                reverse=True,
-            )
-            if len(dates) >= 2:
-                try:
-                    d1 = datetime.strptime(dates[0][:10], "%Y-%m-%d")
-                    d2 = datetime.strptime(dates[1][:10], "%Y-%m-%d")
-                    gap = (d1 - d2).days
-                    if gap <= 7:
-                        tags.append(("週回購", "#c62828"))
-                    elif gap <= 30:
-                        tags.append(("月回購", "#ef6c00"))
-                    else:
-                        tags.append(("年回購", "#546e7a"))
-                except Exception:
-                    pass
-        return tags
+        # 計算距今天數
+        days_ago = 9999
+        if last_date_str:
+            try:
+                last_dt = datetime.strptime(last_date_str[:10], "%Y-%m-%d")
+                days_ago = (datetime.now(_TZ_TW).replace(tzinfo=None) - last_dt).days
+            except Exception:
+                pass
+        # 忠實客：訂單 ≥ 3 筆（優先顯示）
+        if count >= 3:
+            return [("🔁 忠實客", "#7b1fa2")]
+        # 單次客觀察期：只有 1 筆，30 天內
+        if count == 1 and days_ago <= 30:
+            return [("🆕 單次客", "#1976d2")]
+        # 過客：只有 1 筆，超過 60 天沒回購
+        if count == 1 and days_ago > 60:
+            return [("👀 過客", "#90a4ae")]
+        # 沉睡客：有訂單但 90 天沒回購
+        if days_ago > 90:
+            return [("💤 沉睡客", "#546e7a")]
+        # 一般回頭客（2 筆，60 天內）
+        return [("🛍 回頭客", "#e65100")]
 
     # 建立 modal 用的客戶 JSON 資料
     import html as _html
@@ -3005,9 +2998,9 @@ def customers_admin():
 
     modal_json = json.dumps(modal_data, ensure_ascii=False)
     # 標籤篩選列 HTML（依出現順序排列）
-    TAG_ORDER = ["全新宅配","全新自取","舊客宅配","舊客自取","週回購","月回購","年回購"]
+    TAG_ORDER = ["🔁 忠實客","🛍 回頭客","🆕 單次客","💤 沉睡客","👀 過客"]
     sorted_tags = [t for t in TAG_ORDER if t in all_tag_labels]
-    TAG_COLORS = {"全新宅配":"#1976d2","全新自取":"#388e3c","舊客宅配":"#e65100","舊客自取":"#7b1fa2","週回購":"#c62828","月回購":"#ef6c00","年回購":"#546e7a"}
+    TAG_COLORS = {"🔁 忠實客":"#7b1fa2","🛍 回頭客":"#e65100","🆕 單次客":"#1976d2","💤 沉睡客":"#546e7a","👀 過客":"#90a4ae"}
     filter_bar_html = "".join(
         "<button class='ftag' data-tag='" + t + "' style='--ac:" + TAG_COLORS.get(t, "#888") + "'>" + t + "</button>"
         for t in sorted_tags
