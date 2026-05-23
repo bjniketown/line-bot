@@ -526,6 +526,8 @@ def get_phone_profile_by_uid(uid: str) -> dict:
         "address": address,
         "line_uid": uid,
         "notes": row.get("notes", ""),
+        "display_name": row.get("display_name", ""),
+        "picture_url": row.get("picture_url", ""),
     }
 
 # ── 電話標準化與 phone_profile 雙層查詢 ──────────────────────────────────
@@ -780,6 +782,14 @@ def save_customer_profile(uid: str, profile: dict):
     if not existing and phone:
         existing = get_phone_profile(phone) or {}
 
+    # 假電話合併：若找到的現有紀錄是假電話（line_ 開頭）且現在有真實電話
+    fake_record = None
+    if existing and phone and existing.get("phone", "").startswith("line_"):
+        fake_record = existing
+        # 另外查真實電話是否已有獨立紀錄
+        real_existing = get_phone_profile(phone) or {}
+        existing = real_existing  # 改用真實電話紀錄為基礎（可能是空的）
+
     if existing:
         # 回訪客人：只更新有變動的欄位，line_uid 一律補綁
         update = {"updated_at": datetime.now(_TZ_TW).isoformat()}
@@ -787,6 +797,12 @@ def save_customer_profile(uid: str, profile: dict):
             update["line_uid"] = uid
         if name and name != existing.get("name", ""):
             update["name"] = name
+        # 補入 LINE 頭像與名稱（從假電話紀錄搶救）
+        if fake_record:
+            if fake_record.get("display_name") and not existing.get("display_name"):
+                update["display_name"] = fake_record["display_name"]
+            if fake_record.get("picture_url") and not existing.get("picture_url"):
+                update["picture_url"] = fake_record["picture_url"]
         # 備用電話附加到備註（避免重複）
         if extra_phones_note:
             old_notes = existing.get("notes", "") or ""
@@ -804,10 +820,29 @@ def save_customer_profile(uid: str, profile: dict):
                     "label": "預設", "is_default": not bool(existing_addrs),
                 })
     else:
-        # 全新客人：完整寫入
+        # 全新客人（含假電話升級為真實電話）：完整寫入
         if phone:
             notes_val = extra_phones_note or ""
-            save_phone_profile(phone, {"name": name, "phone": phone, "address": addr, "line_uid": uid, "notes": notes_val})
+            extra = {}
+            if fake_record:
+                if fake_record.get("display_name"): extra["display_name"] = fake_record["display_name"]
+                if fake_record.get("picture_url"):  extra["picture_url"]  = fake_record["picture_url"]
+            save_phone_profile(phone, {"name": name, "phone": phone, "address": addr, "line_uid": uid, "notes": notes_val, **extra})
+
+    # 假電話紀錄處理完畢後刪除（避免 CRM 出現重複假電話客人）
+    if fake_record and phone:
+        fake_phone = fake_record.get("phone", "")
+        if fake_phone and fake_phone.startswith("line_"):
+            try:
+                requests.delete(
+                    f"{SUPABASE_URL}/rest/v1/customers",
+                    headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+                    params={"phone": f"eq.{fake_phone}"},
+                    timeout=5,
+                )
+                print(f"[MERGE] 假電話紀錄已刪除 {fake_phone[:20]}")
+            except Exception as e:
+                print(f"[MERGE_ERR] {e}")
 
 def customer_profile_text(uid: str, current_msg: str = "") -> str:
     """回傳客人資料提示，供每次呼叫 Claude 時動態注入。
@@ -3455,6 +3490,7 @@ document.querySelectorAll('.ftag').forEach(btn => {{
         f"<button class='btn btn-b' type='submit'>搜尋</button>"
         f"</form>"
         f"<a class='btn btn-g' href='/customers?token={token}&action=export'>匯出 CSV</a>"
+        f"<a class='btn' style='background:#ff9800;color:#fff' href='/customers?token={token}'>🔄 重新整理</a>"
         f"<span class='cnt'>顯示 <span id='visible-cnt'>{total}</span> 筆</span>"
         f"</div>"
         + (f"<div class='filter-bar'>{filter_bar_html}</div>" if filter_bar_html else "") +
@@ -3600,6 +3636,7 @@ tr:hover td{background:#fdf3e7}
         f"<div class='tabs'>{tab_delivery}{tab_pickup}</div>"
         "<div class='toolbar'>"
         f"<a class='btn btn-g' href='{export_url}'>匯出 CSV</a>"
+        f"<a class='btn' style='background:#ff9800;color:#fff' href='/orders?token={token}&tab={tab}'>🔄 重新整理</a>"
         f"<span class='cnt'>共 {cnt} 筆</span>"
         "</div>"
         "<table>"
