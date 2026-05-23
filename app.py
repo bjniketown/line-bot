@@ -850,6 +850,7 @@ def customer_profile_text(uid: str, current_msg: str = "") -> str:
     p = get_customer_profile(uid)
 
     # 若 UID 無資料，嘗試從對話記憶+當次訊息中抓電話比對歷史資料
+    just_recognized = False  # 標記本次是透過電話剛識別成功的回訪客人
     if not p:
         history = get_history(uid)
         all_text = " ".join(m["content"] for m in history[-10:])
@@ -859,6 +860,7 @@ def customer_profile_text(uid: str, current_msg: str = "") -> str:
         if phone_match:
             p = get_phone_profile(phone_match.group())
             if p:
+                just_recognized = True  # 電話比對成功，第一次識別出此回訪客人
                 # 只補綁 line_uid，不覆蓋其他資料
                 if uid and not p.get("line_uid"):
                     _supa_upsert("customers", {
@@ -876,6 +878,13 @@ def customer_profile_text(uid: str, current_msg: str = "") -> str:
     masked_address = _mask_address(p.get("address", ""))
 
     lines = ["【回訪客人資料（系統自動帶入）】"]
+    if just_recognized and masked_name:
+        lines.append(
+            f"→ 系統剛透過電話號碼比對成功，確認此客人為回訪舊客戶。"
+            f"請在回覆中自然地表達我們認識他、非常歡迎再次為他服務，"
+            f"例如：「{masked_name}您好！感謝您再次光顧，很高興能再為您服務 😊」，"
+            "語氣溫暖親切，接著繼續處理客人的需求。"
+        )
     if masked_name:
         lines.append(f"姓名：{masked_name}")
     if masked_phone:
