@@ -3491,11 +3491,79 @@ document.querySelectorAll('.ftag').forEach(btn => {{
         f"</form>"
         f"<a class='btn btn-g' href='/customers?token={token}&action=export'>匯出 CSV</a>"
         f"<a class='btn' style='background:#ff9800;color:#fff' href='/customers?token={token}'>🔄 重新整理</a>"
+        f"<a class='btn' style='background:#9c27b0;color:#fff' href='/fix-line-profiles?token={token}' onclick=\"return confirm('將為所有有 LINE UID 但缺少頭像/名稱的客戶補抓資料，確定？')\">📷 補抓 LINE 資料</a>"
         f"<span class='cnt'>顯示 <span id='visible-cnt'>{total}</span> 筆</span>"
         f"</div>"
         + (f"<div class='filter-bar'>{filter_bar_html}</div>" if filter_bar_html else "") +
         f"<div class='card-grid'>{cards_html}</div>"
         + script +
+        f"</body></html>"
+    )
+
+
+@app.route("/fix-line-profiles")
+def fix_line_profiles():
+    token = request.args.get("token", "")
+    if not ADMIN_TOKEN or token != ADMIN_TOKEN:
+        abort(403)
+    if not SUPABASE_URL:
+        return "Supabase 未設定", 500
+
+    # 查出有 line_uid 但缺 display_name 或 picture_url 的客戶
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/customers",
+            headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+            params={"line_uid": "not.is.null", "or": "(display_name.is.null,picture_url.is.null)", "select": "line_uid,name,phone", "limit": "200"},
+            timeout=10,
+        )
+        targets = r.json() if r.ok else []
+    except Exception as e:
+        return f"查詢失敗：{e}", 500
+
+    results = []
+    for c in targets:
+        uid = c.get("line_uid", "")
+        if not uid:
+            continue
+        try:
+            rp = requests.get(
+                f"https://api.line.me/v2/bot/profile/{uid}",
+                headers={"Authorization": f"Bearer {LINE_TOKEN}"},
+                timeout=5,
+            )
+            if not rp.ok:
+                results.append(f"❌ {c.get('name') or c.get('phone')}：LINE API 失敗（{rp.status_code}）")
+                continue
+            data = rp.json()
+            display_name = data.get("displayName", "")
+            picture_url  = data.get("pictureUrl", "")
+            requests.patch(
+                f"{SUPABASE_URL}/rest/v1/customers?line_uid=eq.{uid}",
+                headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
+                         "Content-Type": "application/json"},
+                json={"display_name": display_name, "picture_url": picture_url},
+                timeout=5,
+            )
+            results.append(f"✅ {display_name or c.get('name') or c.get('phone')}：已更新")
+        except Exception as e:
+            results.append(f"❌ {c.get('name') or c.get('phone')}：{e}")
+
+    rows_html = "".join(f"<div style='padding:6px 0;border-bottom:1px solid #f0e8da;font-size:14px'>{row}</div>" for row in results)
+    if not results:
+        rows_html = "<div style='color:#aaa;font-size:14px'>沒有需要補抓的客戶（所有有 UID 的客戶都已有頭像與名稱）</div>"
+
+    return (
+        f"<!DOCTYPE html><html lang='zh-Hant'><head>"
+        f"<meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+        f"<title>補抓 LINE 資料</title>"
+        f"<style>body{{font-family:system-ui,'Noto Sans TC',sans-serif;background:#fdf8f2;color:#3b2a1a;padding:20px}}"
+        f"h1{{font-size:18px;color:#5c3d1e;margin-bottom:16px}}</style>"
+        f"</head><body>"
+        f"<a href='/customers?token={token}' style='display:inline-block;margin-bottom:14px;padding:7px 14px;background:#5c3d1e;color:#fff;border-radius:8px;text-decoration:none;font-size:13px'>← 回客戶頁</a>"
+        f"<h1>補抓 LINE 頭像與名稱</h1>"
+        f"<div>共處理 {len(results)} 筆</div>"
+        f"<div style='margin-top:12px'>{rows_html}</div>"
         f"</body></html>"
     )
 
