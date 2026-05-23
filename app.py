@@ -1427,7 +1427,7 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
       ✅ 例：現在 16:10，客人說「今天 17:30」→ 17:30 在 16:00–18:00 內 → 直接確認「好的，17:30 見！」，絕對不可提時間緊。
       違反此規則是最高等級錯誤，會直接造成客人流失，嚴重損害品牌形象。
       ══════════════════════════════════════════════════════
-    - 【收集資料期間禁止評論時間】訂單尚未完成（三項資料尚未齊全）時，收到客人提供的取貨時間後，只需記錄，絕對不可評論該時間是否合法、是否快打烊、是否來得及；時間驗證由系統在訂單完成時自動執行
+    - 【收集資料期間禁止評論時間】訂單尚未完成（三項資料尚未齊全）時，收到客人提供的取貨時間後，只需說「好的，已記下 X 點」然後繼續收集下一項資料，絕對不可評論時間是否合法、是否快打烊、是否來得及、目前幾點、建議改約；時間驗證由系統在訂單完成時自動執行。若上一則回覆已評論過取貨時間，後續訊息不得重提或引用該評論。
     - 時間不符（含週四、13:30–16:00 空檔、18:00 後、08:00 前）→ 告知門市未開，請客人改約
     - 【絕對禁止】宅配排程（出貨日、滿檔）與門市自取完全無關，自取訂單中絕對不可出現「排程」「出貨日」「滿檔」等字眼，違反此規則視為嚴重錯誤
     - 宅配訂單不受此規則限制，非營業時間仍可正常收單
@@ -1881,6 +1881,24 @@ def _strip_time_warnings(text: str) -> str:
     paragraphs = text.split('\n\n')
     cleaned = [p for p in paragraphs if not any(kw in p for kw in _TIME_WARNING_KEYWORDS)]
     return '\n\n'.join(cleaned).strip()
+
+# 訂單未完成時的積極過濾：同時含「現在時間」+「建議改約」類字眼的段落直接移除
+_PREMATURE_TIME_NOW_KW  = ('目前已是', '目前時間', '現在是', '現在已是', '目前是')
+_PREMATURE_TIME_SUGGEST = ('改為其他時間', '是否改', '改約', '其他時段', '其他日期', '比較緊', '時間緊', '來不及', '建議改')
+
+def _strip_premature_time_comments(text: str) -> str:
+    """訂單未完成時，移除 Claude 對取貨時間的評論與改約建議段落。"""
+    paragraphs = text.split('\n\n')
+    cleaned = []
+    for p in paragraphs:
+        has_now  = any(kw in p for kw in _PREMATURE_TIME_NOW_KW)
+        has_sugg = any(kw in p for kw in _PREMATURE_TIME_SUGGEST)
+        # 含「現在幾點」+「建議改約」→ 移除；或含擴充後的打烊關鍵字 → 移除
+        if (has_now and has_sugg) or any(kw in p for kw in _TIME_WARNING_KEYWORDS + ('比較緊',)):
+            continue
+        cleaned.append(p)
+    result = '\n\n'.join(cleaned).strip()
+    return result if result else text  # 若全部被清掉保留原文
 
 # 從 Claude 回覆中自動偵測時間警告，若時間實際合法則移除（不需要等 <<PICKUP>> 標籤）
 _RESPONSE_DT_RE = re.compile(
@@ -2583,6 +2601,9 @@ def ask(uid, msg):
     else:
         clean = CALC_TAG.sub('', clean).strip()  # 無訂單標記時也要清掉 CALC 標籤
     clean = _auto_strip_invalid_time_warnings(clean, msg)  # 全域掃描：同時看客人原始訊息
+    # 訂單尚未完成時（無 PICKUP 標記），積極移除時間評論與改約建議
+    if not order_type:
+        clean = _strip_premature_time_comments(clean)
 
     # Python-side 取貨時間驗證：Claude 不可靠，由 Python 最終裁定
     if order_type == "pickup" and order_info:
