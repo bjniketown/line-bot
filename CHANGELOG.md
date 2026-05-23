@@ -2,6 +2,17 @@
 
 ---
 
+## 2026-05-23（假電話合併修正）
+
+### Bug 修正
+- **假電話紀錄合併**：`_fetch_and_save_line_profile` 在客人尚未給電話時，會用 `line_` + UID 前12碼建立暫時紀錄。客人下訂給出真實電話後，`save_customer_profile` 現在會偵測假電話並執行合併：
+  - 若真實電話尚未建檔 → 刪假電話，用真實電話建新紀錄（保留 display_name、picture_url）
+  - 若真實電話已有舊紀錄 → 補入 display_name、picture_url，刪假電話
+  - 合併後 Render log 印 `[MERGE] 假電話紀錄已刪除`
+- **`get_phone_profile_by_uid` 補回 display_name、picture_url**：合併邏輯需要讀取這兩個欄位，已加入回傳格式
+
+---
+
 ## 2026-05-02（第一次大幅更新）
 
 ### 新增功能
