@@ -2512,8 +2512,19 @@ def validate_ship_recv_date(text: str) -> str:
                     f"方案二：{opt2.strftime('%Y-%m-%d')}（{_WEEKDAYS[opt2.weekday()]}）出貨 → {opt2_recv.strftime('%Y-%m-%d')} 收件")
         return f"\n✅ 收件日 {raw}，出貨日 {ship_str}（{weekday}）確認。"
 
-    text = _SHIPDATE_TAG.sub(_fix_ship, text)
-    text = _RECVDATE_TAG.sub(_fix_recv, text)
+    shipdate_found = [False]
+    def _fix_ship_track(m):
+        result = _fix_ship(m)
+        if result:
+            shipdate_found[0] = True
+        return result
+
+    text = _SHIPDATE_TAG.sub(_fix_ship_track, text)
+    # 若已有 SHIPDATE 確認（含出貨日+收件日），略過多餘的 RECVDATE 標記
+    if not shipdate_found[0]:
+        text = _RECVDATE_TAG.sub(_fix_recv, text)
+    else:
+        text = _RECVDATE_TAG.sub("", text)
     return text
 
 
