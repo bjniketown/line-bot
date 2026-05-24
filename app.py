@@ -332,11 +332,17 @@ def _seconds_until_midnight() -> int:
     midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     return max(60, int((midnight - now).total_seconds()))
 
+def _seconds_until_1830() -> int:
+    """計算距離今天 18:30 的秒數（當日售完用）。"""
+    now = datetime.now(_TZ_TW)
+    target = now.replace(hour=18, minute=30, second=0, microsecond=0)
+    return max(60, int((target - now).total_seconds()))
+
 def set_store_closed(msg: str, days: int = 1):
     global _store_closed_msg, _store_closed_days
     _store_closed_msg  = msg
     _store_closed_days = days
-    ttl = _seconds_until_midnight() if days <= 1 else days * 86400
+    ttl = _seconds_until_1830() if days <= 1 else days * 86400
     # 格式："{days}:{msg}"，方便 store_status_text 判斷模式
     _redis(["SET", "store_closed", f"{days}:{msg}", "EX", ttl])
 
