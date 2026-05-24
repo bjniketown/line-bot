@@ -3805,22 +3805,30 @@ def recent_admin():
     rows.sort(key=lambda r: r["last_time"], reverse=True)
     rows = rows[:20]
 
-    # 批次查 LINE 顯示名稱
-    def _get_line_name(uid: str) -> str:
+    # 批次並行查 LINE 顯示名稱（threading 加速）
+    def _get_line_name(row: dict):
+        uid = row["uid"]
+        # 先查 Supabase customers 有無已存的 display_name
+        p = get_customer_profile(uid)
+        if p and p.get("display_name"):
+            row["name"] = p["display_name"]
+            return
         try:
             r = requests.get(
                 f"https://api.line.me/v2/bot/profile/{uid}",
                 headers={"Authorization": f"Bearer {LINE_TOKEN}"},
-                timeout=5,
+                timeout=3,
             )
             if r.ok:
-                return r.json().get("displayName", uid)
+                row["name"] = r.json().get("displayName", uid)
+                return
         except Exception:
             pass
-        return uid
+        row["name"] = uid
 
-    for row in rows:
-        row["name"] = _get_line_name(row["uid"])
+    threads = [threading.Thread(target=_get_line_name, args=(row,)) for row in rows]
+    for t in threads: t.start()
+    for t in threads: t.join(timeout=6)
 
     # 注入記憶
     inject_result = request.args.get("inject_result", "")
@@ -3886,6 +3894,7 @@ def recent_admin():
         "tr:last-child td{border-bottom:none}"
         "tr:hover{background:#fff8f0}"
         "</style></head><body>"
+        f"<a href='/store?token={token}' style='display:inline-block;margin-bottom:12px;padding:7px 14px;background:#5c3d1e;color:#fff;border-radius:8px;text-decoration:none;font-size:13px'>← 回首頁</a>"
         "<h1>老鄰居豆干絲 · 最近對話</h1>"
         + inject_banner
         + "<p style='font-size:12px;color:#888;margin-bottom:12px'>最近 20 個有對話記錄的客人，點選列尾可直接注入記憶。</p>"
@@ -3893,7 +3902,6 @@ def recent_admin():
         "<thead><tr><th>最後對話</th><th>顯示名稱</th><th>最後訊息</th><th>LINE UID</th><th>注入記憶</th></tr></thead>"
         f"<tbody>{table_rows}</tbody>"
         "</table>"
-        f"<p style='margin-top:14px;font-size:12px;color:#aaa'><a href='/store?token={token}' style='color:#c9a96e'>← 回首頁</a></p>"
         "</body></html>"
     )
 
