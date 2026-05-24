@@ -3880,7 +3880,7 @@ def recent_admin():
         "<thead><tr><th>最後對話</th><th>顯示名稱</th><th>最後訊息</th><th>LINE UID</th><th>注入記憶</th></tr></thead>"
         f"<tbody>{table_rows}</tbody>"
         "</table>"
-        f"<p style='margin-top:14px;font-size:12px;color:#aaa'><a href='/orders?token={token}' style='color:#c9a96e'>← 回訂單管理</a></p>"
+        f"<p style='margin-top:14px;font-size:12px;color:#aaa'><a href='/store?token={token}' style='color:#c9a96e'>← 回首頁</a></p>"
         "</body></html>"
     )
 
