@@ -630,6 +630,14 @@ def _mask_name(name: str) -> str:
         return name
     return name[0] + '*' * (len(name) - 1)
 
+def _is_clean_line_name(name: str) -> bool:
+    """判斷 LINE 名稱是否適合直接用於稱呼（無特殊符號、長度合理）。"""
+    if not name or len(name) > 8:
+        return False
+    if re.search(r'[()（）.。\[\]{}<>_/\\|@#$%^&*+~`]', name):
+        return False
+    return True
+
 def _mask_phone(phone: str) -> str:
     """電話遮罩：保留前4碼和後2碼，中間以 * 代替。"""
     p = normalize_phone(phone)
@@ -883,12 +891,17 @@ def customer_profile_text(uid: str, current_msg: str = "") -> str:
     masked_phone   = _mask_phone(p.get("phone", ""))
     masked_address = _mask_address(p.get("address", ""))
 
+    # LINE 名稱（用於稱呼）
+    display_name = p.get("display_name", "") or ""
+    greet_name = display_name if _is_clean_line_name(display_name) else ""
+
     lines = ["【回訪客人資料（系統自動帶入）】"]
-    if just_recognized and masked_name:
+    if just_recognized:
+        # 電話比對成功：Supabase 姓名可能是收件人非下單者，不用姓名稱呼，改用「您」
         lines.append(
-            f"→ 系統剛透過電話號碼比對成功，確認此客人為回訪舊客戶。"
-            f"請在回覆中自然地表達我們認識他、非常歡迎再次為他服務，"
-            f"例如：「{masked_name}您好！感謝您再次光顧，很高興能再為您服務 😊」，"
+            "→ 系統剛透過電話號碼比對成功，確認此客人為回訪舊客戶。"
+            "請在回覆中自然表達我們有他的訂購記錄、非常歡迎再次為他服務，"
+            "例如：「您好！我們有您的訂購記錄，很高興能再為您服務 😊」，"
             "語氣溫暖親切，接著繼續處理客人的需求。"
         )
     if masked_name:
@@ -911,14 +924,16 @@ def customer_profile_text(uid: str, current_msg: str = "") -> str:
             "客人說不同時，詢問哪個部分要更改，其餘沿用。"
         )
     elif is_pickup and not is_delivery:
+        call = f"{greet_name}！" if greet_name else "您！"
         lines.append(
             f"→ 此客人為門市自取回訪客人，姓名（{masked_name}）與電話（{masked_phone}）已確認，"
             "絕對不可再詢問姓名或電話，"
-            f"主動告知「您好 {masked_name}！請問這次預計什麼時候來取貨呢？」直接進入取貨時間確認。"
+            f"主動告知「您好 {call}請問這次預計什麼時候來取貨呢？」直接進入取貨時間確認。"
         )
     else:
+        call = f"{greet_name}，" if greet_name else ""
         lines.append(
-            f"→ 此客人為回訪客人，姓名（{masked_name}）與電話（{masked_phone}）已確認，不可再詢問。"
+            f"→ 此客人為回訪客人{call}姓名（{masked_name}）與電話（{masked_phone}）已確認，不可再詢問。"
             "待客人確認宅配或自取後，再詢問對應所需資料。"
         )
     return "\n".join(lines)
