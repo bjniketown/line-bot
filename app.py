@@ -74,6 +74,23 @@ def _redis(command: list):
     except Exception:
         return None
 
+def _redis_pipeline(commands: list) -> list:
+    """批次執行多個 Upstash Redis 指令（pipeline），回傳結果列表。"""
+    if not UPSTASH_URL or not commands:
+        return []
+    try:
+        r = requests.post(
+            UPSTASH_URL.rstrip("/") + "/pipeline",
+            headers={"Authorization": f"Bearer {UPSTASH_TOKEN}"},
+            json=commands,
+            timeout=10,
+        )
+        if r.ok:
+            return [item.get("result") for item in r.json()]
+        return []
+    except Exception:
+        return []
+
 _local_histories: dict = {}   # Redis 失效時的 in-memory fallback
 _local_daily:     dict = {}   # 每日呼叫計數的本地 fallback（key: "dlimit:xxx:YYYY-MM-DD"）
 _local_customers: set  = set() # 客戶 UID 名單的本地 fallback
@@ -3789,38 +3806,39 @@ tr:hover td{background:#fdf3e7}
 
 @app.route("/recent")
 def recent_admin():
-    """最近 20 個對話的 LINE UID + 顯示名稱，方便查詢後注入記憶。"""
+    """最近 10 個對話的 LINE UID + 顯示名稱，方便查詢後注入記憶。"""
     token = request.args.get("token", "")
     if not ADMIN_TOKEN or token != ADMIN_TOKEN:
         abort(403)
 
-    # 取得所有 hist:U* 的 key，每個 key 撈最後一筆訊息的時間
+    # 取得所有 hist:U* 的 key，pipeline 批次 GET 加速
     keys = _redis(["KEYS", "hist:U*"]) or []
     rows = []
-    for k in keys:
-        uid = k.replace("hist:", "")
-        raw = _redis(["GET", k])
-        last_time = ""
-        last_msg = ""
-        if raw:
-            try:
-                hist = json.loads(raw)
-                if hist:
-                    last = hist[-1]
-                    last_time = last.get("time", "")[:16] if last.get("time") else ""
-                    last_msg = last.get("content", "")
-                    if isinstance(last_msg, list):
-                        last_msg = " ".join(
-                            b.get("text", "") for b in last_msg if isinstance(b, dict) and b.get("type") == "text"
-                        )
-                    last_msg = str(last_msg)[:40]
-            except Exception:
-                pass
-        rows.append({"uid": uid, "last_time": last_time, "last_msg": last_msg})
+    if keys:
+        raws = _redis_pipeline([["GET", k] for k in keys])
+        for k, raw in zip(keys, raws):
+            uid = k.replace("hist:", "")
+            last_time = ""
+            last_msg = ""
+            if raw:
+                try:
+                    hist = json.loads(raw)
+                    if hist:
+                        last = hist[-1]
+                        last_time = last.get("time", "")[:16] if last.get("time") else ""
+                        last_msg = last.get("content", "")
+                        if isinstance(last_msg, list):
+                            last_msg = " ".join(
+                                b.get("text", "") for b in last_msg if isinstance(b, dict) and b.get("type") == "text"
+                            )
+                        last_msg = str(last_msg)[:40]
+                except Exception:
+                    pass
+            rows.append({"uid": uid, "last_time": last_time, "last_msg": last_msg})
 
-    # 按最後對話時間降序，取前 20
+    # 按最後對話時間降序，取前 10
     rows.sort(key=lambda r: r["last_time"], reverse=True)
-    rows = rows[:20]
+    rows = rows[:10]
 
     # 批次並行查 LINE 顯示名稱（threading 加速）
     def _get_line_name(row: dict):
@@ -3846,6 +3864,33 @@ def recent_admin():
     threads = [threading.Thread(target=_get_line_name, args=(row,)) for row in rows]
     for t in threads: t.start()
     for t in threads: t.join(timeout=6)
+
+    # 手動搜尋（電話或 UID）
+    search_q = request.args.get("search", "").strip()
+    search_row = None
+    search_err = ""
+    if search_q:
+        search_uid = None
+        if search_q.startswith("U") and len(search_q) > 20:
+            search_uid = search_q
+        else:
+            # 用電話查 Supabase
+            sp = get_phone_profile(search_q)
+            if sp:
+                search_uid = sp.get("line_uid", "")
+        if search_uid:
+            raw = _redis(["GET", f"hist:{search_uid}"])
+            hist = []
+            if raw:
+                try:
+                    hist = json.loads(raw)
+                except Exception:
+                    pass
+            p = get_customer_profile(search_uid)
+            sname = (p.get("display_name") or p.get("name") or search_uid) if p else search_uid
+            search_row = {"uid": search_uid, "name": sname, "hist": hist[-10:]}
+        else:
+            search_err = "找不到此電話或 UID 的客人資料"
 
     # 注入記憶
     inject_result = request.args.get("inject_result", "")
@@ -3896,6 +3941,44 @@ def recent_admin():
     elif inject_result == "fail":
         inject_banner = "<p style='color:#c0392b;font-weight:bold;margin-bottom:12px'>❌ 注入失敗，請確認 UID</p>"
 
+    # 搜尋結果區塊
+    search_block = ""
+    if search_q:
+        if search_err:
+            search_block = f"<p style='color:#c0392b;margin:12px 0'>{search_err}</p>"
+        elif search_row:
+            hist_lines = ""
+            for m in search_row["hist"]:
+                role = "👤 客人" if m.get("role") == "user" else "🤖 機器人"
+                t = m.get("time", "")[:16]
+                content = m.get("content", "")
+                if isinstance(content, list):
+                    content = " ".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+                hist_lines += (
+                    f"<div style='margin-bottom:6px'>"
+                    f"<span style='font-size:11px;color:#888'>{t} {role}</span><br>"
+                    f"<span style='font-size:13px'>{str(content)[:120]}</span>"
+                    f"</div>"
+                )
+            inject_form_s = (
+                f"<form method='get' action='/recent' style='margin-top:10px'>"
+                f"<input type='hidden' name='token' value='{token}'>"
+                f"<input type='hidden' name='action' value='inject_memory'>"
+                f"<input type='hidden' name='uid' value='{search_row['uid']}'>"
+                f"<input type='text' name='msg' placeholder='要注入的記憶內容' "
+                f"style='padding:6px 8px;border:1px solid #c9a96e;border-radius:6px;font-size:13px;width:100%;margin-bottom:6px'>"
+                f"<button type='submit' style='padding:6px 16px;background:#5c3d1e;color:#fff;border:none;border-radius:6px;font-size:13px;cursor:pointer'>寫入記憶</button>"
+                f"</form>"
+            )
+            search_block = (
+                f"<div style='background:#fff;border-radius:10px;padding:14px;margin:12px 0;box-shadow:0 1px 4px rgba(0,0,0,.08)'>"
+                f"<div style='font-weight:bold;margin-bottom:8px;color:#5c3d1e'>🔍 {search_row['name']}</div>"
+                f"<div style='font-size:11px;color:#aaa;margin-bottom:10px'>{search_row['uid']}</div>"
+                f"<div style='background:#fdf8f2;border-radius:8px;padding:10px;max-height:300px;overflow-y:auto'>{hist_lines or '<p style=\"color:#aaa;font-size:12px\">無對話記錄</p>'}</div>"
+                f"{inject_form_s}"
+                f"</div>"
+            )
+
     return (
         "<!doctype html><html><head><meta charset='utf-8'>"
         "<meta name='referrer' content='no-referrer'>"
@@ -3914,7 +3997,14 @@ def recent_admin():
         f"<a href='/store?token={token}' style='display:inline-block;margin-bottom:12px;padding:7px 14px;background:#5c3d1e;color:#fff;border-radius:8px;text-decoration:none;font-size:13px'>← 回首頁</a>"
         "<h1>老鄰居豆干絲 · 最近對話</h1>"
         + inject_banner
-        + "<p style='font-size:12px;color:#888;margin-bottom:12px'>最近 20 個有對話記錄的客人，點選列尾可直接注入記憶。</p>"
+        + f"<form method='get' action='/recent' style='margin-bottom:14px;display:flex;gap:8px'>"
+        f"<input type='hidden' name='token' value='{token}'>"
+        f"<input type='text' name='search' value='{search_q}' placeholder='輸入電話或 LINE UID 查詢' "
+        f"style='flex:1;padding:8px 10px;border:1px solid #c9a96e;border-radius:8px;font-size:14px'>"
+        f"<button type='submit' style='padding:8px 16px;background:#5c3d1e;color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer'>查詢</button>"
+        f"</form>"
+        + search_block
+        + "<p style='font-size:12px;color:#888;margin-bottom:12px'>最近 10 個有對話記錄的客人，點選列尾可直接注入記憶。</p>"
         "<table>"
         "<thead><tr><th>最後對話</th><th>顯示名稱</th><th>最後訊息</th><th>LINE UID</th><th>注入記憶</th></tr></thead>"
         f"<tbody>{table_rows}</tbody>"
