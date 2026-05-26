@@ -873,6 +873,78 @@ def _exec_create_pickup(uid: str, name: str, phone: str,
     return {"success": True, "confirm_message": confirm_msg}
 
 
+def _exec_get_order_status(uid: str, phone: str = "") -> dict:
+    """查詢客人最新訂單狀態，先用 uid 查，找不到再用電話查。"""
+    norm_phone = normalize_phone(phone) if phone else ""
+    # 先嘗試從 Redis active_order 找
+    order_data = None
+    if norm_phone:
+        key = _redis(["GET", f"active_order:{norm_phone}"])
+        if key:
+            raw = _redis(["GET", key])
+            if raw:
+                try:
+                    order_data = json.loads(raw)
+                except Exception:
+                    pass
+    # Redis 找不到，查 Supabase
+    if not order_data and norm_phone and SUPABASE_URL:
+        try:
+            r = requests.get(
+                f"{SUPABASE_URL}/rest/v1/orders",
+                headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+                params={"phone": f"eq.{norm_phone}", "order": "created_at.desc", "limit": "1"},
+                timeout=5,
+            )
+            if r.ok and r.json():
+                row = r.json()[0]
+                order_data = {
+                    "type":        row.get("order_type", ""),
+                    "name":        row.get("name", ""),
+                    "phone":       row.get("phone", ""),
+                    "address":     row.get("address", ""),
+                    "items":       row.get("items", ""),
+                    "ship_date":   row.get("ship_date", ""),
+                    "pickup_time": row.get("pickup_time", ""),
+                    "time":        row.get("created_at", "")[:16],
+                }
+        except Exception:
+            pass
+    if not order_data:
+        return {"found": False, "message": "查無訂單記錄，請確認電話號碼是否正確。"}
+    order_type = order_data.get("type", "")
+    items = order_data.get("items", "")
+    created_at = order_data.get("time", "")
+    if order_type == "宅配":
+        ship_date = order_data.get("ship_date", "")
+        recv_date = ""
+        if ship_date:
+            try:
+                recv = datetime.strptime(ship_date, "%Y-%m-%d") + timedelta(days=get_delivery_days())
+                recv_date = recv.strftime("%Y-%m-%d")
+            except Exception:
+                pass
+        return {
+            "found": True,
+            "order_type": "宅配",
+            "items": items,
+            "ship_date": ship_date,
+            "recv_date": recv_date,
+            "name": order_data.get("name", ""),
+            "address": order_data.get("address", ""),
+            "created_at": created_at,
+        }
+    else:
+        return {
+            "found": True,
+            "order_type": "門市自取",
+            "items": items,
+            "pickup_time": order_data.get("pickup_time", ""),
+            "name": order_data.get("name", ""),
+            "created_at": created_at,
+        }
+
+
 def _exec_modify_order(uid: str, phone: str, modify_type: str,
                        name: str = "", address: str = "", items: str = "",
                        ship_date: str = "", pickup_datetime: str = "",
@@ -2823,6 +2895,20 @@ TOOLS = [
         },
     },
     {
+        "name": "get_order_status",
+        "description": (
+            "查詢客人最新訂單狀態。"
+            "客人詢問訂單內容、出貨日期、取貨時間，或想確認上次訂了什麼時呼叫。"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "phone": {"type": "string", "description": "客人電話號碼（有電話時傳入）"},
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "modify_order",
         "description": (
             "修改已成立的訂單（宅配或自取）。"
@@ -2935,6 +3021,11 @@ def _call_claude(history: list, uid: str = "") -> str:
                         elif block.name == "validate_pickup_time":
                             result = _exec_validate_pickup_time(
                                 block.input.get("pickup_datetime", ""),
+                            )
+                        elif block.name == "get_order_status":
+                            result = _exec_get_order_status(
+                                uid=uid,
+                                phone=block.input.get("phone", ""),
                             )
                         elif block.name == "modify_order":
                             result = _exec_modify_order(
