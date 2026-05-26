@@ -1072,12 +1072,12 @@ def save_customer_profile(uid: str, profile: dict):
                 print(f"[MERGE_ERR] {e}")
 
 def customer_profile_text(uid: str, current_msg: str = "") -> str:
-    """回傳客人資料提示，供每次呼叫 Claude 時動態注入。
-    優先查 profile:{uid}；找不到時從對話記憶+當次訊息抓電話查 phone_profile，找到後升級綁定。"""
+    """回傳回訪客人打招呼提示（僅供識別稱呼用）。
+    地址確認與資料比對改由 get_customer_profile 工具執行。"""
     p = get_customer_profile(uid)
 
-    # 若 UID 無資料，嘗試從對話記憶+當次訊息中抓電話比對歷史資料
-    just_recognized = False  # 標記本次是透過電話剛識別成功的回訪客人
+    # uid 查不到時，從對話記憶+當次訊息抓電話嘗試識別
+    just_recognized = False
     if not p:
         history = get_history(uid)
         all_text = " ".join(m["content"] for m in history[-10:])
@@ -1087,8 +1087,7 @@ def customer_profile_text(uid: str, current_msg: str = "") -> str:
         if phone_match:
             p = get_phone_profile(phone_match.group())
             if p:
-                just_recognized = True  # 電話比對成功，第一次識別出此回訪客人
-                # 只補綁 line_uid，不覆蓋其他資料
+                just_recognized = True
                 if uid and not p.get("line_uid"):
                     _supa_upsert("customers", {
                         "phone": p["phone"],
@@ -1099,56 +1098,21 @@ def customer_profile_text(uid: str, current_msg: str = "") -> str:
     if not p:
         return ""
 
-    # 遮罩處理
-    masked_name    = _mask_name(p.get("name", ""))
-    masked_phone   = _mask_phone(p.get("phone", ""))
-    masked_address = _mask_address(p.get("address", ""))
-
-    # LINE 名稱（用於稱呼）
     display_name = p.get("display_name", "") or ""
     greet_name = display_name if _is_clean_line_name(display_name) else ""
+    masked_name = _mask_name(p.get("name", ""))
 
-    lines = ["【回訪客人資料（系統自動帶入）】"]
+    lines = ["【回訪客人識別（僅供稱呼）】"]
     if just_recognized:
-        # 電話比對成功：Supabase 姓名可能是收件人非下單者，不用姓名稱呼，改用「您」
         lines.append(
-            "→ 系統剛透過電話號碼比對成功，確認此客人為回訪舊客戶。"
-            "請在回覆中自然表達我們有他的訂購記錄、非常歡迎再次為他服務，"
-            "例如：「您好！我們有您的訂購記錄，很高興能再為您服務 😊」，"
-            "語氣溫暖親切，接著繼續處理客人的需求。"
-        )
-    if masked_name:
-        lines.append(f"姓名：{masked_name}")
-    if masked_phone:
-        lines.append(f"電話：{masked_phone}")
-
-    # 判斷對話中是否提到宅配意圖
-    history = get_history(uid)
-    recent_text = " ".join(m["content"] for m in history[-6:]) + " " + current_msg
-    is_delivery = any(kw in recent_text for kw in ("宅配", "寄送", "寄過來", "郵寄", "收件", "運費"))
-    is_pickup   = any(kw in recent_text for kw in ("門市", "自取", "取貨", "來拿", "來取"))
-
-    if p.get("address") and is_delivery and not is_pickup:
-        lines.append(f"上次宅配地址：{masked_address}")
-        lines.append(
-            f"→ 客人選擇宅配，主動詢問「請問這次收件資料與上次相同嗎？"
-            f"（收件人：{masked_name} / 電話：{masked_phone} / 地址：{masked_address}）」；"
-            "客人確認相同後直接沿用內部完整資料，不在對話中顯示完整地址；"
-            "客人說不同時，詢問哪個部分要更改，其餘沿用。"
-        )
-    elif is_pickup and not is_delivery:
-        call = f"{greet_name}！" if greet_name else "您！"
-        lines.append(
-            f"→ 此客人為門市自取回訪客人，姓名（{masked_name}）與電話（{masked_phone}）已確認，"
-            "絕對不可再詢問姓名或電話，"
-            f"主動告知「您好 {call}請問這次預計什麼時候來取貨呢？」直接進入取貨時間確認。"
+            "→ 系統透過電話比對確認為回訪客戶，請自然表達歡迎再次光臨，"
+            "例如：「您好！我們有您的訂購記錄，很高興能再為您服務 😊」"
         )
     else:
-        call = f"{greet_name}，" if greet_name else ""
-        lines.append(
-            f"→ 此客人為回訪客人{call}姓名（{masked_name}）與電話（{masked_phone}）已確認，不可再詢問。"
-            "待客人確認宅配或自取後，再詢問對應所需資料。"
-        )
+        call = f"{greet_name}" if greet_name else masked_name
+        if call:
+            lines.append(f"→ 回訪客人，可用「{call}」稱呼。")
+    lines.append("資料確認（姓名/電話/地址）請呼叫 get_customer_profile 工具執行，不可自行假設。")
     return "\n".join(lines)
 
 def get_shipping_full_dates() -> set:
@@ -1700,6 +1664,20 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
    - 天氣、新聞、娛樂、閒聊
    - 任何與老鄰居豆干絲產品、訂購、門市、配送無關的話題
 
+【客人資料比對（工具必須執行）】
+
+▶ get_customer_profile 工具：當客人提供電話號碼，或明確表示要宅配／自取時，立即呼叫此工具。
+  - found=true → 直接顯示工具回傳的遮罩資料（姓名、電話、地址）給客人確認：
+    「請問這次訂購資料與上次相同嗎？（姓名：XX / 電話：XXXX / 地址：XXXX）」
+    客人說「一樣」→ 沿用；客人說「不同」→ 追問哪個部分要更改
+  - found=false → 正常逐步收集姓名、電話、地址
+  - ❌ 禁止在未呼叫此工具前自行假設客人是新客或回訪客
+  - ❌ 禁止說「基於隱私考量不顯示地址」，工具已遮罩，直接顯示即可
+
+▶ 平行呼叫（加速）：以下工具互相獨立，可在同一輪同時呼叫：
+  - calc_delivery + check_ship_date（資料確認後同時計算金額與出貨日）
+  - calc_pickup + validate_pickup_time（資料確認後同時計算金額與驗證時間）
+
 【訂單建立（工具優先，標記備援）】
 
 ▶ 宅配訂單：當客戶提供收件人全名（或公司名）、電話、地址、品項與數量後，呼叫 create_order 工具建立訂單，工具會自動計算金額、安排出貨日、附上匯款資訊並儲存訂單。
@@ -1933,6 +1911,51 @@ def _calc_shipping(total_units: int) -> int:
         return 225
     else:
         return 290
+
+def _exec_get_customer_profile(uid: str, phone: str = "") -> dict:
+    """查詢客人歷史資料，先用 uid 查，找不到再用電話查。回傳遮罩後資料供 Claude 顯示確認。"""
+    p = get_customer_profile(uid) if uid else {}
+
+    # uid 查不到時改用電話查
+    if not p and phone:
+        norm = normalize_phone(phone)
+        p = get_phone_profile(norm) if norm else {}
+        # 比對成功：補綁 line_uid
+        if p and uid and not p.get("line_uid"):
+            _supa_upsert("customers", {
+                "phone": p["phone"],
+                "line_uid": uid,
+                "updated_at": datetime.now(_TZ_TW).isoformat(),
+            })
+
+    if not p:
+        return {
+            "found": False,
+            "message": "查無此客人歷史資料，為新客戶，請正常收集姓名、電話、地址。",
+        }
+
+    masked_name    = _mask_name(p.get("name", ""))
+    masked_phone   = _mask_phone(p.get("phone", ""))
+    masked_address = _mask_address(p.get("address", ""))
+
+    result = {
+        "found": True,
+        "name":    masked_name,
+        "phone":   masked_phone,
+        "address": masked_address,
+        "has_address": bool(p.get("address", "")),
+        "message": (
+            f"查到回訪客人資料：\n"
+            f"・姓名：{masked_name}\n"
+            f"・電話：{masked_phone}\n"
+            + (f"・上次收件地址：{masked_address}\n" if masked_address else "")
+            + "請直接顯示以上資料給客人確認，詢問：「請問這次的訂購資料與上次相同嗎？」"
+            "客人確認後直接進入下一步；客人說不同時追問哪個部分要更改。"
+            "電話與姓名已確認，不可再重複詢問。"
+        ),
+    }
+    return result
+
 
 def _exec_calc_delivery(items: list) -> dict:
     """計算宅配訂單金額、運費、划算提醒。"""
@@ -2709,6 +2732,25 @@ def _full_date_warning(history: list) -> str:
 
 TOOLS = [
     {
+        "name": "get_customer_profile",
+        "description": (
+            "查詢客人的歷史資料（姓名、電話、收件地址）。"
+            "當客人提供電話號碼，或表示要宅配／自取時呼叫此工具。"
+            "工具回傳資料後，直接顯示給客人確認是否沿用，不得自行假設或省略確認步驟。"
+            "若客人為新客戶（無歷史資料），工具會告知，Claude 再正常收集資料。"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "phone": {
+                    "type": "string",
+                    "description": "客人提供的電話號碼，未提供時傳空字串",
+                },
+            },
+            "required": ["phone"],
+        },
+    },
+    {
         "name": "calc_delivery",
         "description": (
             "計算宅配訂單的品項金額、運費與划算建議。"
@@ -2929,7 +2971,12 @@ def _call_claude(history: list, uid: str = "") -> str:
                 for block in r.content:
                     if block.type != "tool_use":
                         continue
-                    if block.name == "calc_delivery":
+                    if block.name == "get_customer_profile":
+                        result = _exec_get_customer_profile(
+                            uid=uid,
+                            phone=block.input.get("phone", ""),
+                        )
+                    elif block.name == "calc_delivery":
                         result = _exec_calc_delivery(block.input.get("items", []))
                     elif block.name == "calc_pickup":
                         result = _exec_calc_pickup(block.input.get("items", []))
