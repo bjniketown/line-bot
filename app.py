@@ -789,6 +789,8 @@ def _exec_create_order(uid: str, name: str, phone: str, address: str,
                        items: str, ship_date: str, total: int, shipping: int,
                        modify: bool = False) -> dict:
     """建立宅配訂單：驗證資料、寫入 Redis+Supabase、回傳確認訊息。"""
+    if not name or not name.strip():
+        return {"success": False, "error": "缺少收件人姓名，請先向客人確認姓名後再建立訂單。"}
     # 驗證電話
     norm_phone = normalize_phone(phone)
     if not _is_tw_phone(norm_phone):
@@ -842,6 +844,8 @@ def _exec_create_pickup(uid: str, name: str, phone: str,
                         pickup_datetime: str, items: str, total: int,
                         modify: bool = False) -> dict:
     """建立門市自取訂單：驗證資料、寫入 Redis+Supabase、回傳確認訊息。"""
+    if not name or not name.strip():
+        return {"success": False, "error": "缺少客人姓名，請先向客人確認姓名後再建立訂單。"}
     norm_phone = normalize_phone(phone)
     if not _is_tw_phone(norm_phone):
         return {"success": False, "error": f"電話格式錯誤：{phone}，請確認後重新輸入。"}
