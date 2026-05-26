@@ -1716,7 +1716,7 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
 ▶ 出貨日／收件日：由系統 check_ship_date 工具計算並驗證，直接使用工具回傳的出貨日與收件日，不得自行推算或輸出 <<SHIPDATE>> / <<RECVDATE>> 標記。
   ⚠️ 週四門市公休只影響【出貨】，不影響【收件】。客人週四收件完全可行，只要週三有出貨即可。絕對不可說「週四無法收件」或「週四公休所以不行」。"""
 
-RATE_LIMIT_SECONDS      = 0    # debounce 已處理頻率控制，rate limit 停用
+RATE_LIMIT_SECONDS      = 1    # 每位用戶最少間隔秒數，防止惡意洗版
 MAX_CLAUDE_PER_USER_DAY = 30   # 每位用戶每天最多呼叫 Claude 次數
 MAX_CLAUDE_GLOBAL_DAY   = 500  # 全局每天最多呼叫 Claude 次數（防爆紅費用爆炸）
 
@@ -2663,11 +2663,7 @@ def _maybe_push_address_reminder(uid: str, msg: str, claude_reply: str):
 
 
 def _handle_claude(token, uid, text):
-    """快慢分路：快則直接 reply；超時先回「處理中」再 push 結果。
-    送出前檢查 debounce_seq，若有新訊息進來則丟棄本次回覆。"""
-    # 記錄開始處理時的 seq，送出前用來確認沒有新訊息插入
-    start_seq = _redis(["GET", f"debounce_seq:{uid}"])
-
+    """快慢分路：快則直接 reply；超時先回「處理中」再 push 結果。"""
     result_holder = [None]
     done = threading.Event()
 
@@ -2680,28 +2676,15 @@ def _handle_claude(token, uid, text):
         finally:
             done.set()
 
-    def _seq_changed() -> bool:
-        """回傳 True 表示處理中有新訊息進來，應丟棄本次回覆。"""
-        if start_seq is None:
-            return False
-        current = _redis(["GET", f"debounce_seq:{uid}"])
-        return current is not None and current != start_seq
-
     threading.Thread(target=worker, daemon=True).start()
 
     if done.wait(timeout=_FAST_TIMEOUT):
-        if _seq_changed():
-            print(f"[DEBOUNCE_DROP] uid={uid} 有新訊息，丟棄舊回覆")
-            return
         reply(token, result_holder[0])
         _maybe_push_address_reminder(uid, text, result_holder[0])
     else:
         reply(token, "⏳ 稍等一下，我幫您確認中...")
         def push_when_done():
             done.wait()
-            if _seq_changed():
-                print(f"[DEBOUNCE_DROP] uid={uid} 有新訊息，丟棄 push 回覆")
-                return
             push_message(uid, result_holder[0])
             _maybe_push_address_reminder(uid, text, result_holder[0])
         threading.Thread(target=push_when_done, daemon=True).start()
@@ -3508,11 +3491,17 @@ def webhook():
                 reply(token, share_messages())
                 continue
 
-            # ── 所有訊息一律進 debounce buffer，統一等待合併後處理 ──────────
+            rule = quick_rule_reply(text, uid)
+            if rule:
+                reply(token, rule)
+                continue
+
+            # ── Claude 呼叫 → debounce 合併分段訊息 ─────────────────────────
             if not _daily_allowed(uid):
                 reply(token, "您今日的詢問次數已達上限，請明天再試，或直撥 04-25882881 😊")
                 continue
 
+            # 所有訊息一律 debounce 2.5 秒，等待分段訊息合併
             raw = _redis(["GET", f"pending:{uid}"]) or "[]"
             try:
                 pending = json.loads(raw)
@@ -3526,7 +3515,7 @@ def webhook():
     return "OK"
 
 
-_DEBOUNCE_SECS = 1.0
+_DEBOUNCE_SECS = 5.0
 
 def _debounce_worker(uid: str, seq: int):
     """等待 _DEBOUNCE_SECS 秒後，若序號未變則合併所有 pending 訊息一起處理。"""
@@ -3546,11 +3535,6 @@ def _debounce_worker(uid: str, seq: int):
     last_token = pending[-1]["token"]
     combined_text = "\n".join(p["text"] for p in pending)
     print(f"[DEBOUNCE] uid={uid} merged={len(pending)}則 text={combined_text[:80]}")
-    # 合併後先檢查 keyword rules，命中則直接回覆，不呼叫 Claude
-    rule = quick_rule_reply(combined_text, uid)
-    if rule:
-        reply(last_token, rule)
-        return
     _handle_claude(last_token, uid, combined_text)
 
 
