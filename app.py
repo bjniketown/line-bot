@@ -3085,8 +3085,8 @@ def _call_claude(history: list, uid: str = "") -> str:
                     messages=api_history_2,
                     tools=TOOLS,
                 )
-                return r2.content[0].text
-            return r.content[0].text
+                return r2.content[0].text, True  # tool_used=True
+            return r.content[0].text, False
         except anthropic.APIStatusError as e:
             # 額度不足 / 服務過載 → 不值得再試其他 model
             if "credit" in str(e).lower() or e.status_code == 529:
@@ -3277,9 +3277,10 @@ def ask(uid, msg):
     history.append(_msg_with_time("user", msg))
     history = history[-10:]
     raw = None
+    tool_used = False
     for attempt in range(3):
         try:
-            raw = _call_claude(history, uid)
+            raw, tool_used = _call_claude(history, uid)
             break
         except anthropic.APIStatusError as e:
             print(f"[API_ERR] attempt={attempt+1} status={e.status_code} body={str(e)[:200]}")
@@ -3301,55 +3302,62 @@ def ask(uid, msg):
 
     clean, order_type, order_info, is_modify = extract_order(raw)
 
-    # 若客人有修改意圖且 Claude 輸出了 PICKUP/ORDER（非 MODIFY），Python 強制轉成 MODIFY
-    pending_mod = get_pending_modify(uid)
-    if order_info and not is_modify and pending_mod:
-        print(f"[PENDING_MODIFY] 強制轉換 {order_type} → MODIFY_{order_type.upper()}")
-        is_modify = True
-        clear_pending_modify(uid)
-    # 偵測客人是否有修改意圖（已成立訂單的情況下）
-    if get_has_order(uid) and _MODIFY_INTENT_RE.search(msg):
-        # 取得目前訂單類型（從 active_order 推斷）
-        mod_type = "pickup"  # 預設自取，有宅配 active_order 才改
-        set_pending_modify(uid, mod_type)
-        print(f"[PENDING_MODIFY] 偵測到修改意圖，設定 pending_modify={mod_type}")
-    clean = inject_reminder(clean)
-    clean = validate_ship_recv_date(clean)
-    if order_type:
-        clean = inject_correct_total(clean, order_type)
+    if not tool_used:
+        # ── 備援：舊機制（tool use 失敗時才啟動）──
+        # 修改意圖偵測
+        pending_mod = get_pending_modify(uid)
+        if order_info and not is_modify and pending_mod:
+            print(f"[PENDING_MODIFY] 強制轉換 {order_type} → MODIFY_{order_type.upper()}")
+            is_modify = True
+            clear_pending_modify(uid)
+        if get_has_order(uid) and _MODIFY_INTENT_RE.search(msg):
+            mod_type = "pickup"
+            set_pending_modify(uid, mod_type)
+            print(f"[PENDING_MODIFY] 偵測到修改意圖，設定 pending_modify={mod_type}")
+        # 湊包提醒
+        clean = inject_reminder(clean)
+        # 日期驗算
+        clean = validate_ship_recv_date(clean)
+        # 金額驗算
+        if order_type:
+            clean = inject_correct_total(clean, order_type)
+        else:
+            clean = CALC_TAG.sub('', clean).strip()
+        # 取貨時間驗證
+        if order_type == "pickup" and order_info:
+            is_valid, err_msg = validate_pickup_time(order_info)
+            if not is_valid:
+                clean      = err_msg
+                order_info = None
+            else:
+                clean = _strip_time_warnings(clean)
+        # 訂單寫入
+        if order_info:
+            set_has_order(uid)
+            parts = order_info.split("|")
+            if order_type == "order" and len(parts) >= 3:
+                save_customer_profile(uid, {
+                    "name": parts[0].strip(),
+                    "phone": parts[1].strip(),
+                    "address": parts[2].strip(),
+                    "line_uid": uid,
+                })
+            elif order_type == "pickup" and len(parts) >= 2:
+                save_customer_profile(uid, {
+                    "name": parts[0].strip(),
+                    "phone": parts[1].strip(),
+                    "line_uid": uid,
+                })
+            _save_order_record(order_type, order_info, clean, uid, modify=is_modify)
     else:
-        clean = CALC_TAG.sub('', clean).strip()  # 無訂單標記時也要清掉 CALC 標籤
-    clean = _auto_strip_invalid_time_warnings(clean, msg)  # 全域掃描：同時看客人原始訊息
-    # 訂單尚未完成時（無 PICKUP 標記），積極移除時間評論與改約建議
+        # tool use 成功：清掉殘留的舊 tag（防萬一）
+        clean = CALC_TAG.sub('', clean).strip()
+        print(f"[TOOL_USED] 跳過舊機制備援")
+
+    # 全域過濾（不論 tool 有無，都執行）
+    clean = _auto_strip_invalid_time_warnings(clean, msg)
     if not order_type:
         clean = _strip_premature_time_comments(clean)
-
-    # Python-side 取貨時間驗證：Claude 不可靠，由 Python 最終裁定
-    if order_type == "pickup" and order_info:
-        is_valid, err_msg = validate_pickup_time(order_info)
-        if not is_valid:
-            clean      = err_msg   # 完全取代 Claude 的錯誤回覆
-            order_info = None      # 不成立訂單
-        else:
-            clean = _strip_time_warnings(clean)  # 移除 Claude 錯誤加的打烊警告
-
-    if order_info:
-        set_has_order(uid)
-        parts = order_info.split("|")
-        if order_type == "order" and len(parts) >= 3:
-            save_customer_profile(uid, {
-                "name": parts[0].strip(),
-                "phone": parts[1].strip(),
-                "address": parts[2].strip(),
-                "line_uid": uid,
-            })
-        elif order_type == "pickup" and len(parts) >= 2:
-            save_customer_profile(uid, {
-                "name": parts[0].strip(),
-                "phone": parts[1].strip(),
-                "line_uid": uid,
-            })
-        _save_order_record(order_type, order_info, clean, uid, modify=is_modify)
 
     history.append(_msg_with_time("assistant", clean))
     set_history(uid, history)
