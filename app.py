@@ -2865,6 +2865,19 @@ def _exec_check_ship_date(requested_date: str = "", date_type: str = "next") -> 
     note = f"最近可出貨日 {ship_d.strftime('%m/%d')}（{weekday_names[ship_d.weekday()]}），預計 {recv_d.strftime('%m/%d')} 收件"
     if busy:
         note += f"（繁盛期，可能延遲 1-2 天）"
+    # 週五出貨警告
+    friday_warning = ship_d.weekday() == 4  # 4 = 週五
+    friday_note = ""
+    if friday_warning:
+        friday_note = (
+            f"出貨日為週五（{ship_d.strftime('%m/%d')}），預計週六（{recv_d.strftime('%m/%d')}）送達。"
+            f"提醒客人注意：\n"
+            f"① 若週六無人在家或公司未上班，黑貓將無法完成配送\n"
+            f"② 黑貓週日不配送，下次送件需等到週一\n"
+            f"③ 豆干絲為冷凍商品，在黑貓車上多放兩天可能影響新鮮度\n"
+            f"建議改為下週一或週三出貨，隔天即可收件，品質更有保障。\n"
+            f"請問週六方便收件嗎？若不方便，我幫您改安排出貨日期。"
+        )
     return {
         "available": True,
         "store_closed": False,
@@ -2873,6 +2886,8 @@ def _exec_check_ship_date(requested_date: str = "", date_type: str = "next") -> 
         "ship_date": ship_d.strftime("%Y-%m-%d"),
         "recv_date": recv_d.strftime("%Y-%m-%d"),
         "note": note,
+        "friday_warning": friday_warning,
+        "friday_note": friday_note,
     }
 
 
