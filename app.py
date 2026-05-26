@@ -2663,7 +2663,11 @@ def _maybe_push_address_reminder(uid: str, msg: str, claude_reply: str):
 
 
 def _handle_claude(token, uid, text):
-    """快慢分路：快則直接 reply；超時先回「處理中」再 push 結果。"""
+    """快慢分路：快則直接 reply；超時先回「處理中」再 push 結果。
+    送出前檢查 debounce_seq，若有新訊息進來則丟棄本次回覆。"""
+    # 記錄開始處理時的 seq，送出前用來確認沒有新訊息插入
+    start_seq = _redis(["GET", f"debounce_seq:{uid}"])
+
     result_holder = [None]
     done = threading.Event()
 
@@ -2676,15 +2680,28 @@ def _handle_claude(token, uid, text):
         finally:
             done.set()
 
+    def _seq_changed() -> bool:
+        """回傳 True 表示處理中有新訊息進來，應丟棄本次回覆。"""
+        if start_seq is None:
+            return False
+        current = _redis(["GET", f"debounce_seq:{uid}"])
+        return current is not None and current != start_seq
+
     threading.Thread(target=worker, daemon=True).start()
 
     if done.wait(timeout=_FAST_TIMEOUT):
+        if _seq_changed():
+            print(f"[DEBOUNCE_DROP] uid={uid} 有新訊息，丟棄舊回覆")
+            return
         reply(token, result_holder[0])
         _maybe_push_address_reminder(uid, text, result_holder[0])
     else:
         reply(token, "⏳ 稍等一下，我幫您確認中...")
         def push_when_done():
             done.wait()
+            if _seq_changed():
+                print(f"[DEBOUNCE_DROP] uid={uid} 有新訊息，丟棄 push 回覆")
+                return
             push_message(uid, result_holder[0])
             _maybe_push_address_reminder(uid, text, result_holder[0])
         threading.Thread(target=push_when_done, daemon=True).start()
@@ -3515,7 +3532,7 @@ def webhook():
     return "OK"
 
 
-_DEBOUNCE_SECS = 5.0
+_DEBOUNCE_SECS = 1.0
 
 def _debounce_worker(uid: str, seq: int):
     """等待 _DEBOUNCE_SECS 秒後，若序號未變則合併所有 pending 訊息一起處理。"""
