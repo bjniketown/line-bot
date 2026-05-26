@@ -3815,16 +3815,31 @@ def customers_admin():
         phone = request.form.get("phone", "").strip()
         notes = request.form.get("notes", "").strip()
         line_uid_input = request.form.get("line_uid", "").strip()
+        name_input = request.form.get("name_edit", "").strip()
+        phone_new = request.form.get("phone_new", "").strip()
+        address_input = request.form.get("address_edit", "").strip()
         if phone and SUPABASE_URL:
             patch_data = {"notes": notes}
             if line_uid_input:
                 patch_data["line_uid"] = line_uid_input
+            if name_input:
+                patch_data["name"] = name_input
+            if phone_new and phone_new != phone:
+                patch_data["phone"] = phone_new
             requests.patch(
                 f"{SUPABASE_URL}/rest/v1/customers?phone=eq.{phone}",
                 headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
                          "Content-Type": "application/json"},
                 json=patch_data, timeout=5,
             )
+            if address_input and SUPABASE_URL:
+                target_phone = phone_new if phone_new and phone_new != phone else phone
+                requests.patch(
+                    f"{SUPABASE_URL}/rest/v1/addresses?phone=eq.{target_phone}&is_default=eq.true",
+                    headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
+                             "Content-Type": "application/json"},
+                    json={"address": address_input}, timeout=5,
+                )
         from flask import redirect
         return redirect(f"/customers?token={token}&q={request.form.get('q','')}")
 
@@ -4048,7 +4063,10 @@ def customers_admin():
   <div class='card-addr'>{_html.escape(address) if address else '<span style=\"color:#ccc\">無地址</span>'}</div>
   <div class='card-bottom'>
     <div class='card-tags'></div>
-    <div class='card-date'>{last_date or updated}</div>
+    <div style='display:flex;align-items:center;gap:8px'>
+      <span class='card-date'>{last_date or updated}</span>
+      <button class='edit-btn' data-idx='{idx}' onclick='event.stopPropagation();openModal({idx})'>✏️ 編輯</button>
+    </div>
   </div>
 </div>"""
 
@@ -4100,6 +4118,7 @@ input[type=text]{padding:8px 12px;border:1.5px solid #c9a96e;border-radius:8px;f
 .order-item{background:#fdf8f2;border-radius:8px;padding:8px 10px;margin-bottom:6px;font-size:12px}
 .save-form input{padding:6px 10px;border:1px solid #c9a96e;border-radius:7px;font-size:13px;width:100%}
 .save-form button{margin-top:8px;padding:8px 18px;background:#5c3d1e;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:13px}
+.edit-btn{padding:3px 8px;font-size:11px;background:#f0e8da;color:#5c3d1e;border:1px solid #c9a96e;border-radius:6px;cursor:pointer;white-space:nowrap}
 @media(max-width:480px){
   input[type=text]{width:140px}
   .card-grid{grid-template-columns:1fr}
@@ -4131,9 +4150,13 @@ input[type=text]{padding:8px 12px;border:1.5px solid #c9a96e;border-radius:8px;f
       <form class='save-form' method='post' id='save-form'>
         <input type='hidden' name='token' id='sf-token'>
         <input type='hidden' name='phone' id='sf-phone'>
-        <input type='text' name='notes' id='sf-notes' placeholder='備註'>
+        <div style='font-size:12px;color:#888;font-weight:bold;margin-bottom:6px'>✏️ 編輯資料</div>
+        <input type='text' name='name_edit' id='sf-name' placeholder='姓名'>
+        <input type='text' name='phone_new' id='sf-phone-new' placeholder='電話（修改號碼）' style='margin-top:6px'>
+        <input type='text' name='address_edit' id='sf-addr' placeholder='收件地址（預設地址）' style='margin-top:6px'>
+        <input type='text' name='notes' id='sf-notes' placeholder='備註' style='margin-top:6px'>
         <input type='text' name='line_uid' id='sf-uid' placeholder='LINE UID（未綁定時填入）' style='margin-top:6px'>
-        <button type='submit'>儲存備註 / UID</button>
+        <button type='submit'>儲存</button>
       </form>
       <div style='margin-top:10px;border-top:1px solid #f0e8da;padding-top:10px'>
         <a id='del-btn' href='#' onclick='return confirmDelete()'
@@ -4174,6 +4197,9 @@ function openModal(idx) {{
   ob.innerHTML = d.orders.length ? d.orders.map(o=>`<div class='order-item'>${{o.date}} ${{o.type}} — ${{o.items}}</div>`).join('') : '<div style="color:#aaa;font-size:12px">無訂單記錄</div>';
   document.getElementById('sf-phone').value = d.phone;
   document.getElementById('sf-token').value = TOKEN;
+  document.getElementById('sf-name').value = d.name || '';
+  document.getElementById('sf-phone-new').value = d.phone || '';
+  document.getElementById('sf-addr').value = (d.addrs && d.addrs.length) ? d.addrs[0] : '';
   document.getElementById('sf-notes').value = d.notes || '';
   document.getElementById('sf-uid').value = d.line_uid || '';
   document.getElementById('save-form').action = `/customers?token=${{TOKEN}}`;
