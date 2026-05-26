@@ -3009,84 +3009,84 @@ def _call_claude(history: list, uid: str = "") -> str:
                 messages=api_history,
                 tools=TOOLS,
             )
-            # Tool use：Claude 要求執行工具
-            if r.stop_reason == "tool_use":
+            # Tool use 迴圈：持續執行直到 Claude 不再要求 tool
+            tool_used = False
+            current_history = api_history[:]
+            for _round in range(5):  # 最多 5 輪防無限迴圈
+                if r.stop_reason != "tool_use":
+                    break
+                tool_used = True
                 tool_results = []
                 for block in r.content:
-                    if block.type == "tool_use":
-                        if block.name == "calc_delivery":
-                            result = _exec_calc_delivery(block.input.get("items", []))
-                        elif block.name == "calc_pickup":
-                            result = _exec_calc_pickup(block.input.get("items", []))
-                        elif block.name == "validate_pickup_time":
-                            result = _exec_validate_pickup_time(
-                                block.input.get("pickup_datetime", ""),
-                            )
-                        elif block.name == "get_order_status":
-                            result = _exec_get_order_status(
-                                uid=uid,
-                                phone=block.input.get("phone", ""),
-                            )
-                        elif block.name == "modify_order":
-                            result = _exec_modify_order(
-                                uid=uid,
-                                phone=block.input.get("phone", ""),
-                                modify_type=block.input.get("modify_type", ""),
-                                name=block.input.get("name", ""),
-                                address=block.input.get("address", ""),
-                                items=block.input.get("items", ""),
-                                ship_date=block.input.get("ship_date", ""),
-                                pickup_datetime=block.input.get("pickup_datetime", ""),
-                                total=int(block.input.get("total", 0)),
-                                shipping=int(block.input.get("shipping", 0)),
-                            )
-                        elif block.name == "create_order":
-                            result = _exec_create_order(
-                                uid=uid,
-                                name=block.input.get("name", ""),
-                                phone=block.input.get("phone", ""),
-                                address=block.input.get("address", ""),
-                                items=block.input.get("items", ""),
-                                ship_date=block.input.get("ship_date", ""),
-                                total=int(block.input.get("total", 0)),
-                                shipping=int(block.input.get("shipping", 0)),
-                            )
-                        elif block.name == "create_pickup":
-                            result = _exec_create_pickup(
-                                uid=uid,
-                                name=block.input.get("name", ""),
-                                phone=block.input.get("phone", ""),
-                                pickup_datetime=block.input.get("pickup_datetime", ""),
-                                items=block.input.get("items", ""),
-                                total=int(block.input.get("total", 0)),
-                            )
-                        elif block.name == "check_ship_date":
-                            result = _exec_check_ship_date(
-                                block.input.get("requested_date", ""),
-                                block.input.get("date_type", "next"),
-                            )
-                        else:
-                            result = {"error": "unknown tool"}
-                        print(f"[TOOL] {block.name} → {result}")
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": block.id,
-                            "content": json.dumps(result, ensure_ascii=False),
-                        })
-                # 第二次呼叫：把工具結果回傳給 Claude
-                api_history_2 = api_history + [
+                    if block.type != "tool_use":
+                        continue
+                    if block.name == "calc_delivery":
+                        result = _exec_calc_delivery(block.input.get("items", []))
+                    elif block.name == "calc_pickup":
+                        result = _exec_calc_pickup(block.input.get("items", []))
+                    elif block.name == "validate_pickup_time":
+                        result = _exec_validate_pickup_time(block.input.get("pickup_datetime", ""))
+                    elif block.name == "get_order_status":
+                        result = _exec_get_order_status(uid=uid, phone=block.input.get("phone", ""))
+                    elif block.name == "modify_order":
+                        result = _exec_modify_order(
+                            uid=uid,
+                            phone=block.input.get("phone", ""),
+                            modify_type=block.input.get("modify_type", ""),
+                            name=block.input.get("name", ""),
+                            address=block.input.get("address", ""),
+                            items=block.input.get("items", ""),
+                            ship_date=block.input.get("ship_date", ""),
+                            pickup_datetime=block.input.get("pickup_datetime", ""),
+                            total=int(block.input.get("total", 0)),
+                            shipping=int(block.input.get("shipping", 0)),
+                        )
+                    elif block.name == "create_order":
+                        result = _exec_create_order(
+                            uid=uid,
+                            name=block.input.get("name", ""),
+                            phone=block.input.get("phone", ""),
+                            address=block.input.get("address", ""),
+                            items=block.input.get("items", ""),
+                            ship_date=block.input.get("ship_date", ""),
+                            total=int(block.input.get("total", 0)),
+                            shipping=int(block.input.get("shipping", 0)),
+                        )
+                    elif block.name == "create_pickup":
+                        result = _exec_create_pickup(
+                            uid=uid,
+                            name=block.input.get("name", ""),
+                            phone=block.input.get("phone", ""),
+                            pickup_datetime=block.input.get("pickup_datetime", ""),
+                            items=block.input.get("items", ""),
+                            total=int(block.input.get("total", 0)),
+                        )
+                    elif block.name == "check_ship_date":
+                        result = _exec_check_ship_date(
+                            block.input.get("requested_date", ""),
+                            block.input.get("date_type", "next"),
+                        )
+                    else:
+                        result = {"error": "unknown tool"}
+                    print(f"[TOOL] round={_round+1} {block.name} → {str(result)[:200]}")
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": json.dumps(result, ensure_ascii=False),
+                    })
+                # 把 tool 結果加入歷史，再次呼叫 Claude
+                current_history = current_history + [
                     {"role": "assistant", "content": r.content},
                     {"role": "user", "content": tool_results},
                 ]
-                r2 = claude.messages.create(
+                r = claude.messages.create(
                     model=model,
                     max_tokens=600,
                     system=system_blocks,
-                    messages=api_history_2,
+                    messages=current_history,
                     tools=TOOLS,
                 )
-                return r2.content[0].text, True  # tool_used=True
-            return r.content[0].text, False
+            return r.content[0].text, tool_used
         except anthropic.APIStatusError as e:
             # 額度不足 / 服務過載 → 不值得再試其他 model
             if "credit" in str(e).lower() or e.status_code == 529:
