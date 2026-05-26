@@ -1927,8 +1927,9 @@ def _calc_shipping(total_units: int) -> int:
     else:
         return 290
 
-def _exec_get_customer_profile(uid: str, phone: str = "") -> dict:
-    """查詢客人歷史資料，先用 uid 查，找不到再用電話查。回傳遮罩後資料供 Claude 顯示確認。"""
+def _exec_get_customer_profile(uid: str, phone: str = "", order_type: str = "") -> dict:
+    """查詢客人歷史資料，先用 uid 查，找不到再用電話查。回傳遮罩後資料供 Claude 顯示確認。
+    order_type: 'delivery'=宅配（顯示地址）, 'pickup'=自取（不顯示地址）"""
     p = get_customer_profile(uid) if uid else {}
 
     # uid 查不到時改用電話查
@@ -1944,24 +1945,34 @@ def _exec_get_customer_profile(uid: str, phone: str = "") -> dict:
             })
 
     if not p:
-        return {
-            "found": False,
-            "message": "查無此客人歷史資料，為新客戶，請正常收集姓名、電話、地址。",
-        }
+        msg = ("查無此客人歷史資料，為新客戶，請正常收集姓名、電話、取貨時間。"
+               if order_type == "pickup" else
+               "查無此客人歷史資料，為新客戶，請正常收集姓名、電話、地址。")
+        return {"found": False, "message": msg}
 
     masked_name    = _mask_name(p.get("name", ""))
     masked_phone   = _mask_phone(p.get("phone", ""))
     masked_address = _mask_address(p.get("address", ""))
 
-    addr_line = f"・地址：{masked_address}\n" if masked_address else "・地址：（無上次收件地址，請詢問）\n"
-    display_message = (
-        f"查到您的回訪資料！請問這次的訂購資料與上次相同嗎？\n\n"
-        f"・姓名：{masked_name}\n"
-        f"・電話：{masked_phone}\n"
-        + addr_line
-        + "\n若有任何不同，請告訴我需要更改的部分 😊"
-    )
-    result = {
+    is_pickup = order_type == "pickup"
+    if is_pickup:
+        display_message = (
+            f"查到您的回訪資料！請問這次的訂購資料與上次相同嗎？\n\n"
+            f"・姓名：{masked_name}\n"
+            f"・電話：{masked_phone}\n"
+            f"\n若有任何不同，請告訴我需要更改的部分 😊"
+        )
+    else:
+        addr_line = f"・地址：{masked_address}\n" if masked_address else "・地址：（無上次收件地址，請詢問）\n"
+        display_message = (
+            f"查到您的回訪資料！請問這次的訂購資料與上次相同嗎？\n\n"
+            f"・姓名：{masked_name}\n"
+            f"・電話：{masked_phone}\n"
+            + addr_line
+            + "\n若有任何不同，請告訴我需要更改的部分 😊"
+        )
+
+    return {
         "found": True,
         "name":    masked_name,
         "phone":   masked_phone,
@@ -1970,7 +1981,6 @@ def _exec_get_customer_profile(uid: str, phone: str = "") -> dict:
         "display_message": display_message,
         "message": "工具已產生 display_message，請將 display_message 的內容原文輸出給客人，不可改寫或省略任何欄位。",
     }
-    return result
 
 
 def _exec_confirm_customer_data(uid: str, name: str, phone: str, address: str) -> dict:
@@ -2826,8 +2836,13 @@ TOOLS = [
                     "type": "string",
                     "description": "客人提供的電話號碼，未提供時傳空字串",
                 },
+                "order_type": {
+                    "type": "string",
+                    "enum": ["delivery", "pickup"],
+                    "description": "訂單類型：宅配傳 delivery（顯示地址欄位），門市自取傳 pickup（不顯示地址）",
+                },
             },
-            "required": ["phone"],
+            "required": ["phone", "order_type"],
         },
     },
     {
@@ -3072,6 +3087,7 @@ def _call_claude(history: list, uid: str = "") -> str:
                         result = _exec_get_customer_profile(
                             uid=uid,
                             phone=block.input.get("phone", ""),
+                            order_type=block.input.get("order_type", ""),
                         )
                     elif block.name == "confirm_customer_data":
                         result = _exec_confirm_customer_data(
