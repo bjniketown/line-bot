@@ -1716,7 +1716,7 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
 ▶ 出貨日／收件日：由系統 check_ship_date 工具計算並驗證，直接使用工具回傳的出貨日與收件日，不得自行推算或輸出 <<SHIPDATE>> / <<RECVDATE>> 標記。
   ⚠️ 週四門市公休只影響【出貨】，不影響【收件】。客人週四收件完全可行，只要週三有出貨即可。絕對不可說「週四無法收件」或「週四公休所以不行」。"""
 
-RATE_LIMIT_SECONDS      = 1    # 每位用戶最少間隔秒數，防止惡意洗版
+RATE_LIMIT_SECONDS      = 0    # debounce 已處理頻率控制，rate limit 停用
 MAX_CLAUDE_PER_USER_DAY = 30   # 每位用戶每天最多呼叫 Claude 次數
 MAX_CLAUDE_GLOBAL_DAY   = 500  # 全局每天最多呼叫 Claude 次數（防爆紅費用爆炸）
 
