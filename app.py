@@ -785,7 +785,8 @@ _BANK_INFO = (
 )
 
 def _exec_create_order(uid: str, name: str, phone: str, address: str,
-                       items: str, ship_date: str, total: int, shipping: int) -> dict:
+                       items: str, ship_date: str, total: int, shipping: int,
+                       modify: bool = False) -> dict:
     """建立宅配訂單：驗證資料、寫入 Redis+Supabase、回傳確認訊息。"""
     # 驗證電話
     norm_phone = normalize_phone(phone)
@@ -815,7 +816,7 @@ def _exec_create_order(uid: str, name: str, phone: str, address: str,
     # 寫入訂單
     order_info = f"{name}|{norm_phone}|{address}|{items}|{ship_date}"
     reply_text = f"宅配訂單 {items} 總金額 {total:,} 元"
-    _save_order_record("order", order_info, reply_text, uid=uid)
+    _save_order_record("order", order_info, reply_text, uid=uid, modify=modify)
     # 儲存客戶資料
     save_customer_profile(uid, {"name": name, "phone": norm_phone, "address": address, "line_uid": uid})
     set_has_order(uid)
@@ -837,7 +838,8 @@ def _exec_create_order(uid: str, name: str, phone: str, address: str,
 
 
 def _exec_create_pickup(uid: str, name: str, phone: str,
-                        pickup_datetime: str, items: str, total: int) -> dict:
+                        pickup_datetime: str, items: str, total: int,
+                        modify: bool = False) -> dict:
     """建立門市自取訂單：驗證資料、寫入 Redis+Supabase、回傳確認訊息。"""
     norm_phone = normalize_phone(phone)
     if not _is_tw_phone(norm_phone):
@@ -855,7 +857,7 @@ def _exec_create_pickup(uid: str, name: str, phone: str,
     # 寫入訂單
     order_info = f"{name}|{norm_phone}|{pickup_datetime}|{items}"
     reply_text = f"自取訂單 {items} 總金額 {total:,} 元"
-    _save_order_record("pickup", order_info, reply_text, uid=uid)
+    _save_order_record("pickup", order_info, reply_text, uid=uid, modify=modify)
     save_customer_profile(uid, {"name": name, "phone": norm_phone, "line_uid": uid})
     set_has_order(uid)
     confirm_msg = (
@@ -869,6 +871,33 @@ def _exec_create_pickup(uid: str, name: str, phone: str,
         f"**總金額：{total:,} 元**"
     )
     return {"success": True, "confirm_message": confirm_msg}
+
+
+def _exec_modify_order(uid: str, phone: str, modify_type: str,
+                       name: str = "", address: str = "", items: str = "",
+                       ship_date: str = "", pickup_datetime: str = "",
+                       total: int = 0, shipping: int = 0) -> dict:
+    """修改訂單：刪除舊訂單，用新資料建立新訂單。"""
+    norm_phone = normalize_phone(phone)
+    if not _is_tw_phone(norm_phone):
+        return {"success": False, "error": f"電話格式錯誤：{phone}"}
+    if modify_type == "delivery":
+        result = _exec_create_order(
+            uid=uid, name=name, phone=norm_phone, address=address,
+            items=items, ship_date=ship_date, total=total, shipping=shipping,
+            modify=True,
+        )
+    elif modify_type == "pickup":
+        result = _exec_create_pickup(
+            uid=uid, name=name, phone=norm_phone,
+            pickup_datetime=pickup_datetime, items=items, total=total,
+            modify=True,
+        )
+    else:
+        return {"success": False, "error": f"modify_type 無效：{modify_type}"}
+    if result.get("success"):
+        result["confirm_message"] = result["confirm_message"].replace("已成立", "已修改")
+    return result
 
 
 def save_customer_profile(uid: str, profile: dict):
@@ -2794,6 +2823,29 @@ TOOLS = [
         },
     },
     {
+        "name": "modify_order",
+        "description": (
+            "修改已成立的訂單（宅配或自取）。"
+            "客人說要改地址、改時間、追加品項、變更數量時呼叫。"
+            "會刪除舊訂單並建立新訂單。"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "phone":           {"type": "string",  "description": "客人電話（用於找舊訂單）"},
+                "modify_type":     {"type": "string",  "enum": ["delivery", "pickup"], "description": "訂單類型：delivery=宅配 / pickup=自取"},
+                "name":            {"type": "string",  "description": "收件人或客人姓名"},
+                "address":         {"type": "string",  "description": "宅配地址（宅配必填）"},
+                "items":           {"type": "string",  "description": "完整品項描述"},
+                "ship_date":       {"type": "string",  "description": "宅配出貨日 YYYY-MM-DD"},
+                "pickup_datetime": {"type": "string",  "description": "自取時間 YYYY-MM-DD HH:MM"},
+                "total":           {"type": "integer", "description": "總金額"},
+                "shipping":        {"type": "integer", "description": "運費，免運填 0"},
+            },
+            "required": ["phone", "modify_type", "name", "items", "total"],
+        },
+    },
+    {
         "name": "create_order",
         "description": (
             "建立宅配訂單，寫入資料庫並回傳確認訊息與匯款資訊。"
@@ -2883,6 +2935,19 @@ def _call_claude(history: list, uid: str = "") -> str:
                         elif block.name == "validate_pickup_time":
                             result = _exec_validate_pickup_time(
                                 block.input.get("pickup_datetime", ""),
+                            )
+                        elif block.name == "modify_order":
+                            result = _exec_modify_order(
+                                uid=uid,
+                                phone=block.input.get("phone", ""),
+                                modify_type=block.input.get("modify_type", ""),
+                                name=block.input.get("name", ""),
+                                address=block.input.get("address", ""),
+                                items=block.input.get("items", ""),
+                                ship_date=block.input.get("ship_date", ""),
+                                pickup_datetime=block.input.get("pickup_datetime", ""),
+                                total=int(block.input.get("total", 0)),
+                                shipping=int(block.input.get("shipping", 0)),
                             )
                         elif block.name == "create_order":
                             result = _exec_create_order(
