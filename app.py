@@ -1954,7 +1954,8 @@ def _exec_calc_delivery(items: list) -> dict:
         bundle_tip = f"目前 {units} 單位，再加 {50-remainder} 單位湊到 {next50}，可免運費省 290 元！"
     elif 1 <= remainder <= 10:
         prev50 = units - remainder
-        bundle_tip = f"目前 {units} 單位，若降為 {prev50} 單位可省 225 元運費，更划算！"
+        if prev50 > 0:
+            bundle_tip = f"目前 {units} 單位，若降為 {prev50} 單位可省 225 元運費，更划算！"
     return {
         "detail": detail,
         "subtotal": subtotal,
