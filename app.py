@@ -1831,6 +1831,78 @@ def _calc_shipping(total_units: int) -> int:
     else:
         return 290
 
+def _exec_calc_delivery(items: list) -> dict:
+    """計算宅配訂單金額、運費、划算提醒。"""
+    PRICES = {"豆干絲": 70, "花生": 100, "昆布": 100, "油潑辣子": 120}
+    subtotal = 0
+    units = 0
+    detail = []
+    for item in items:
+        name = item.get("name", "")
+        qty = int(item.get("qty", 0))
+        price = PRICES.get(name, 0)
+        if price == 0:
+            continue
+        s = qty * price
+        subtotal += s
+        units += qty
+        detail.append(f"{name} {qty}包 × {price}元 = {s:,}元")
+    shipping = _calc_shipping(units)
+    total = subtotal + shipping
+    remainder = units % 50
+    bundle_tip = ""
+    if remainder == 39:
+        next50 = units + 11
+        bundle_tip = (
+            f"目前 {units} 單位，運費 290 元。"
+            f"可選擇：① 降為 {units-1} 單位（運費降為 225 元，省 65 元）"
+            f"② 湊到 {next50} 單位（免運費，省 290 元）"
+        )
+    elif 40 <= remainder <= 49:
+        next50 = units + (50 - remainder)
+        bundle_tip = f"目前 {units} 單位，再加 {50-remainder} 單位湊到 {next50}，可免運費省 290 元！"
+    elif 1 <= remainder <= 10:
+        prev50 = units - remainder
+        bundle_tip = f"目前 {units} 單位，若降為 {prev50} 單位可省 225 元運費，更划算！"
+    return {
+        "detail": detail,
+        "subtotal": subtotal,
+        "units": units,
+        "shipping": shipping,
+        "shipping_note": "免運費" if shipping == 0 else f"運費 {shipping} 元",
+        "total": total,
+        "bundle_tip": bundle_tip,
+    }
+
+
+def _exec_calc_pickup(items: list) -> dict:
+    """計算門市自取訂單金額（不含運費）。"""
+    total = 0
+    detail = []
+    for item in items:
+        name = item.get("name", "")
+        qty = int(item.get("qty", 0))
+        pkg_type = item.get("type", "")
+        price = int(item.get("price", 0))
+        if name == "豆干絲":
+            price = 70 if pkg_type == "真空" else 60
+        elif name in ("花生", "昆布"):
+            if pkg_type == "真空":
+                price = 100
+            # 一般包 price 由 Claude 傳入（50 或 100）
+        elif name == "油潑辣子":
+            price = 120
+        elif name == "水餃":
+            price = 280
+        if price == 0 or qty == 0:
+            continue
+        s = qty * price
+        total += s
+        type_str = f"（{pkg_type}）" if pkg_type else ""
+        detail.append(f"{name}{type_str} {qty}份 × {price}元 = {s:,}元")
+    return {"detail": detail, "total": total}
+
+
 def _replace_total(text: str, total: int) -> str:
     """移除所有舊總金額行（不論格式），統一在最後附加一行正確金額。"""
     # 清掉獨立行格式：**總金額：X,XXX 元**
@@ -2466,6 +2538,65 @@ def _full_date_warning(history: list) -> str:
     return warning
 
 
+TOOLS = [
+    {
+        "name": "calc_delivery",
+        "description": (
+            "計算宅配訂單的品項金額、運費與划算建議。"
+            "客人詢問宅配價格、運費、要多少錢時呼叫。"
+            "品項限宅配規格：豆干絲（真空70元）、花生（真空100元）、昆布（真空100元）、油潑辣子（120元）。"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "description": "品項清單",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "description": "品項名稱：豆干絲、花生、昆布、油潑辣子"},
+                            "qty": {"type": "integer", "description": "數量（包/瓶）"},
+                        },
+                        "required": ["name", "qty"],
+                    },
+                }
+            },
+            "required": ["items"],
+        },
+    },
+    {
+        "name": "calc_pickup",
+        "description": (
+            "計算門市自取訂單的品項金額（不含運費）。"
+            "客人詢問門市自取價格時呼叫。"
+            "品項包含：豆干絲（一般60元/真空70元）、花生（一般50或100元/真空100元）、"
+            "昆布（一般50或100元/真空100元）、油潑辣子（120元）、水餃（280元/包50顆）。"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "description": "品項清單",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "description": "品項名稱：豆干絲、花生、昆布、油潑辣子、水餃"},
+                            "qty": {"type": "integer", "description": "數量"},
+                            "type": {"type": "string", "description": "包裝類型：一般 或 真空（豆干絲/花生/昆布適用）"},
+                            "price": {"type": "integer", "description": "花生或昆布一般包的規格價格：50 或 100"},
+                        },
+                        "required": ["name", "qty"],
+                    },
+                }
+            },
+            "required": ["items"],
+        },
+    },
+]
+
+
 def _call_claude(history: list, uid: str = "") -> str:
     """依序嘗試 _MODELS，第一個成功的回傳結果；全部失敗才丟例外。"""
     current_msg = history[-1]["content"] if history and history[-1]["role"] == "user" else ""
@@ -2501,7 +2632,38 @@ def _call_claude(history: list, uid: str = "") -> str:
                 max_tokens=600,
                 system=system_blocks,
                 messages=api_history,
+                tools=TOOLS,
             )
+            # Tool use：Claude 要求執行工具
+            if r.stop_reason == "tool_use":
+                tool_results = []
+                for block in r.content:
+                    if block.type == "tool_use":
+                        if block.name == "calc_delivery":
+                            result = _exec_calc_delivery(block.input.get("items", []))
+                        elif block.name == "calc_pickup":
+                            result = _exec_calc_pickup(block.input.get("items", []))
+                        else:
+                            result = {"error": "unknown tool"}
+                        print(f"[TOOL] {block.name} → {result}")
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": json.dumps(result, ensure_ascii=False),
+                        })
+                # 第二次呼叫：把工具結果回傳給 Claude
+                api_history_2 = api_history + [
+                    {"role": "assistant", "content": r.content},
+                    {"role": "user", "content": tool_results},
+                ]
+                r2 = claude.messages.create(
+                    model=model,
+                    max_tokens=600,
+                    system=system_blocks,
+                    messages=api_history_2,
+                    tools=TOOLS,
+                )
+                return r2.content[0].text
             return r.content[0].text
         except anthropic.APIStatusError as e:
             # 額度不足 / 服務過載 → 不值得再試其他 model
