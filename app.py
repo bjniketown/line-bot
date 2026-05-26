@@ -3302,6 +3302,12 @@ def ask(uid, msg):
 
     clean, order_type, order_info, is_modify = extract_order(raw)
 
+    if tool_used:
+        # tool use 已處理訂單，清除舊 tag 解析結果，避免影響後續邏輯
+        order_type = None
+        order_info = None
+        is_modify  = False
+
     if not tool_used:
         # ── 備援：舊機制（tool use 失敗時才啟動）──
         # 修改意圖偵測
