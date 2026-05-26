@@ -1551,8 +1551,8 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
      ① 先問品項與數量
      ② 品項確認後問聯絡電話：「請問您的聯絡電話呢？我幫您確認是否有舊資料可以沿用 😊」
      ③ 收到電話後**立即呼叫 get_customer_profile 工具**（必須執行，不可跳過）
-        - found=true → 將工具回傳的 display_message 原文輸出，等客人確認後沿用資料，直接進入 ④
-        - found=false（新客戶）→ 繼續收集：宅配需補問姓名＋地址；自取需補問姓名＋取貨時間
+        - found=true → display_message 原文輸出 → 客人確認後呼叫 confirm_customer_data → 進入 ④
+        - found=false（新客戶）→ 繼續收集：宅配需補問姓名＋地址；自取需補問姓名＋取貨時間；直接進入 ④
      ④ 資料齊全後平行呼叫計算工具：
         - 宅配：calc_delivery + check_ship_date 同時呼叫
         - 自取：calc_pickup + validate_pickup_time 同時呼叫
@@ -1678,10 +1678,15 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
 
 ▶ get_customer_profile 工具：當客人提供電話號碼，或明確表示要宅配／自取時，立即呼叫此工具。
   - found=true → 將工具回傳的 display_message【原文輸出】給客人，不可改寫、不可省略、不可用「與上次相同」代替
-    客人說「一樣」→ 沿用資料，直接進入下一步
-    客人說「不同」→ 追問哪個部分要更改
-  - found=false → 正常逐步收集姓名、電話、地址
+    客人說「一樣」→ 立即呼叫 confirm_customer_data，所有欄位傳遮罩值
+    客人說「不同」→ 追問哪個部分要更改，取得新值後呼叫 confirm_customer_data，不同的欄位傳新值，相同的欄位傳遮罩值
+  - found=false → 正常逐步收集姓名、電話、地址（新客不需呼叫 confirm_customer_data）
   - ❌ 禁止在未呼叫此工具前自行假設客人是新客或回訪客
+
+▶ confirm_customer_data 工具：get_customer_profile 確認後的必要步驟，回傳真實資料供 create_order 使用。
+  - 相同欄位傳遮罩值（含*），工具自動還原真實值
+  - 不同欄位傳客人提供的新值，工具自動儲存並回傳
+  - ❌ 禁止跳過此工具直接呼叫 create_order（回訪客）
   - ❌ 禁止說「基於隱私考量不顯示地址」，工具已遮罩，直接顯示即可
 
 ▶ 平行呼叫（加速）：以下工具互相獨立，可在同一輪同時呼叫：
@@ -1692,7 +1697,7 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
 
 ▶ 宅配訂單：當客戶提供收件人全名（或公司名）、電話、地址、品項與數量後，呼叫 create_order 工具建立訂單，工具會自動計算金額、安排出貨日、附上匯款資訊並儲存訂單。
   必要資料：收件人全名或公司名、收件地址、聯絡電話、品項與數量
-  ⚠️ 地址必須確認：撈到客人舊資料後必須顯示給客人確認；地址空白時主動詢問，不可直接建立訂單。
+  ⚠️ 回訪客的資料確認已由 get_customer_profile + confirm_customer_data 完成，create_order 收到的是已確認的真實資料，直接使用即可。新客地址空白時工具會回傳錯誤，屆時再補問。
 
 ▶ 門市自取訂單：當客戶提供姓名、電話、預計取貨時間後，呼叫 create_pickup 工具建立訂單，工具會自動驗證取貨時間、計算金額並儲存訂單。
   付款方式：現場現金支付，不主動提及匯款選項。
@@ -1966,6 +1971,42 @@ def _exec_get_customer_profile(uid: str, phone: str = "") -> dict:
         "message": "工具已產生 display_message，請將 display_message 的內容原文輸出給客人，不可改寫或省略任何欄位。",
     }
     return result
+
+
+def _exec_confirm_customer_data(uid: str, name: str, phone: str, address: str) -> dict:
+    """客人確認資料後呼叫：解遮罩、儲存變更、回傳真實資料供 create_order 使用。
+    欄位含「*」→ 客人說相同，從資料庫撈真實值；不含「*」→ 客人提供新值，更新資料庫。"""
+    p = get_customer_profile(uid) if uid else {}
+    if not p:
+        norm = normalize_phone(phone) if phone and '*' not in phone else ""
+        p = get_phone_profile(norm) if norm else {}
+
+    real_name    = p.get("name", "")    if '*' in name    else name.strip()
+    real_phone   = p.get("phone", "")   if '*' in phone   else normalize_phone(phone)
+    real_address = p.get("address", "") if '*' in address  else address.strip()
+
+    # 儲存有變動的欄位
+    updates = {}
+    if '*' not in name    and real_name:    updates["name"]    = real_name
+    if '*' not in phone   and real_phone:   updates["phone"]   = real_phone
+    if '*' not in address and real_address: updates["address"] = real_address
+    if updates:
+        save_customer_profile(uid, {**updates, "phone": real_phone or p.get("phone", ""), "line_uid": uid})
+
+    if not real_name or not real_phone:
+        missing = []
+        if not real_name:  missing.append("姓名")
+        if not real_phone: missing.append("電話")
+        return {"success": False, "error": f"資料不完整，缺少：{'、'.join(missing)}，請向客人補問。"}
+
+    return {
+        "success": True,
+        "name": real_name,
+        "phone": real_phone,
+        "address": real_address,
+        "has_address": bool(real_address),
+        "message": f"資料已確認：姓名={real_name}，電話={real_phone}，地址={real_address or '（未提供）'}。請直接使用以上真實資料呼叫 create_order 或 create_pickup。",
+    }
 
 
 def _exec_calc_delivery(items: list) -> dict:
@@ -2450,7 +2491,7 @@ def quick_rule_reply(text, uid=None):
         # 有對話脈絡時，2字以內的模糊確認詞（好、ok…）讓 Claude 依脈絡回覆
         if uid and len(t) <= 2 and get_history(uid):
             return None
-        # 回訪客人選宅配/自取 → 放行給 Claude，讓它直接詢問「資料與上次相同嗎？」
+        # 回訪客人選宅配/自取 → 放行給 Claude，讓它呼叫 get_customer_profile 工具比對資料
         if uid and t in ("宅配", "自取", "店取") and get_customer_profile(uid):
             return None
         return exact
@@ -2762,6 +2803,23 @@ TOOLS = [
         },
     },
     {
+        "name": "confirm_customer_data",
+        "description": (
+            "客人確認資料後呼叫此工具：解遮罩取得真實資料、儲存客人修改、回傳 create_order 可用的完整資料。"
+            "get_customer_profile 顯示資料給客人確認後，必須呼叫此工具，不可直接跳到 create_order。"
+            "欄位含「*」表示客人說相同（沿用舊資料）；欄位不含「*」表示客人提供了新值。"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name":    {"type": "string", "description": "客人確認的姓名，相同則傳遮罩值（含*），新值則傳完整姓名"},
+                "phone":   {"type": "string", "description": "客人確認的電話，相同則傳遮罩值（含*），新值則傳完整電話"},
+                "address": {"type": "string", "description": "客人確認的地址，相同則傳遮罩值（含*），新值則傳完整地址；自取時傳空字串"},
+            },
+            "required": ["name", "phone", "address"],
+        },
+    },
+    {
         "name": "calc_delivery",
         "description": (
             "計算宅配訂單的品項金額、運費與划算建議。"
@@ -2986,6 +3044,13 @@ def _call_claude(history: list, uid: str = "") -> str:
                         result = _exec_get_customer_profile(
                             uid=uid,
                             phone=block.input.get("phone", ""),
+                        )
+                    elif block.name == "confirm_customer_data":
+                        result = _exec_confirm_customer_data(
+                            uid=uid,
+                            name=block.input.get("name", ""),
+                            phone=block.input.get("phone", ""),
+                            address=block.input.get("address", ""),
                         )
                     elif block.name == "calc_delivery":
                         result = _exec_calc_delivery(block.input.get("items", []))
