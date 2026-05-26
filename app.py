@@ -2585,6 +2585,19 @@ def _add_quick_reply_if_needed(messages: list) -> list:
         }
     return messages
 
+def send_typing_indicator(uid: str):
+    """顯示打字中泡泡，讓客人知道機器人正在處理。"""
+    try:
+        requests.post(
+            "https://api.line.me/v2/bot/chat/typing/start",
+            headers={"Authorization": f"Bearer {LINE_TOKEN}", "Content-Type": "application/json"},
+            json={"chatId": uid},
+            timeout=3,
+        )
+    except Exception:
+        pass
+
+
 def reply(token, messages):
     """messages 可以是文字字串，或 LINE message 物件的 list"""
     if isinstance(messages, str):
@@ -3545,6 +3558,7 @@ def _debounce_worker(uid: str, seq: int):
     last_token = pending[-1]["token"]
     combined_text = "\n".join(p["text"] for p in pending)
     print(f"[DEBOUNCE] uid={uid} merged={len(pending)}則 text={combined_text[:80]}")
+    send_typing_indicator(uid)
     # 合併後先檢查 keyword rules，命中則直接回覆，不呼叫 Claude
     rule = quick_rule_reply(combined_text, uid)
     if rule:
