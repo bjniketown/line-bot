@@ -1995,6 +1995,68 @@ def validate_pickup_time(order_info: str) -> tuple[bool, str]:
         f"請問您方便改約其他時間嗎？"
     )
 
+def _exec_validate_pickup_time(pickup_datetime: str) -> dict:
+    """驗證門市自取時間是否合法（格式 YYYY-MM-DD HH:MM）。
+    考量關店模式、週四公休、營業時間、30分鐘準備時間。"""
+    # 關店模式
+    closed_days, closed_msg = _parse_store_closed()
+    if closed_days > 0:
+        return {
+            "valid": False,
+            "reason": "store_closed",
+            "message": f"目前店家休息中：{closed_msg}，暫不接受自取訂單。",
+        }
+    try:
+        dt = datetime.strptime(pickup_datetime, "%Y-%m-%d %H:%M").replace(tzinfo=_TZ_TW)
+    except ValueError:
+        return {"valid": False, "reason": "parse_error", "message": "時間格式無法解析，請提供 YYYY-MM-DD HH:MM 格式。"}
+
+    now = datetime.now(_TZ_TW)
+    wd = dt.weekday()
+    slots = _OPEN_HOURS.get(wd)
+    t = dt.hour * 60 + dt.minute
+
+    # 週四公休
+    if slots is None:
+        return {
+            "valid": False,
+            "reason": "closed_day",
+            "message": f"{_WEEKDAY_ZH[wd]}為門市公休日，請改約其他時間 😊",
+        }
+
+    # 營業時間外
+    in_hours = any((sh * 60 + sm) <= t < (eh * 60 + em) for sh, sm, eh, em in slots)
+    if not in_hours:
+        return {
+            "valid": False,
+            "reason": "out_of_hours",
+            "message": (
+                f"{dt.strftime('%m/%d')}（{_WEEKDAY_ZH[wd]}）{dt.strftime('%H:%M')} 不在營業時段內。\n\n"
+                f"門市營業時間：\n"
+                f"・週一至六 08:00–13:30 / 16:00–18:00\n"
+                f"・週日 08:00–13:30\n"
+                f"・週四全日公休\n\n"
+                f"請問您方便改約其他時間嗎？"
+            ),
+        }
+
+    # 30 分鐘準備時間
+    diff_minutes = (dt - now).total_seconds() / 60
+    if diff_minutes < 30:
+        return {
+            "valid": False,
+            "reason": "too_soon",
+            "message": "由於準備時間較短，建議您直接到門市選購，我們現場有現貨 😊",
+        }
+
+    return {
+        "valid": True,
+        "pickup_datetime": pickup_datetime,
+        "weekday": _WEEKDAY_ZH[wd],
+        "message": f"取貨時間確認：{dt.strftime('%m/%d')}（{_WEEKDAY_ZH[wd]}）{dt.strftime('%H:%M')}",
+    }
+
+
 def _strip_time_warnings(text: str) -> str:
     """取貨時間合法時，移除 Claude 錯誤加入的打烊警告段落。"""
     paragraphs = text.split('\n\n')
@@ -2598,6 +2660,23 @@ TOOLS = [
         },
     },
     {
+        "name": "validate_pickup_time",
+        "description": (
+            "驗證門市自取時間是否合法。"
+            "客人提供自取時間時呼叫，檢查關店模式、週四公休、營業時間、30分鐘準備時間。"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "pickup_datetime": {
+                    "type": "string",
+                    "description": "客人指定的取貨時間，格式 YYYY-MM-DD HH:MM",
+                },
+            },
+            "required": ["pickup_datetime"],
+        },
+    },
+    {
         "name": "check_ship_date",
         "description": (
             "查詢最近可出貨日期，考量關店、繁盛期、滿檔與星期限制。"
@@ -2668,6 +2747,10 @@ def _call_claude(history: list, uid: str = "") -> str:
                             result = _exec_calc_delivery(block.input.get("items", []))
                         elif block.name == "calc_pickup":
                             result = _exec_calc_pickup(block.input.get("items", []))
+                        elif block.name == "validate_pickup_time":
+                            result = _exec_validate_pickup_time(
+                                block.input.get("pickup_datetime", ""),
+                            )
                         elif block.name == "check_ship_date":
                             result = _exec_check_ship_date(
                                 block.input.get("requested_date", ""),
