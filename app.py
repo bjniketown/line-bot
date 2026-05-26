@@ -2906,6 +2906,7 @@ def _call_claude(history: list, uid: str = "") -> str:
             )
             # Tool use 迴圈：持續執行直到 Claude 不再要求 tool
             tool_used = False
+            tool_order_created = False  # True 代表本輪有呼叫建立/修改訂單的工具
             current_history = api_history[:]
             for _round in range(5):  # 最多 5 輪防無限迴圈
                 if r.stop_reason != "tool_use":
@@ -2936,6 +2937,7 @@ def _call_claude(history: list, uid: str = "") -> str:
                             total=int(block.input.get("total", 0)),
                             shipping=int(block.input.get("shipping", 0)),
                         )
+                        tool_order_created = True
                     elif block.name == "create_order":
                         result = _exec_create_order(
                             uid=uid,
@@ -2947,6 +2949,7 @@ def _call_claude(history: list, uid: str = "") -> str:
                             total=int(block.input.get("total", 0)),
                             shipping=int(block.input.get("shipping", 0)),
                         )
+                        tool_order_created = True
                     elif block.name == "create_pickup":
                         result = _exec_create_pickup(
                             uid=uid,
@@ -2956,6 +2959,7 @@ def _call_claude(history: list, uid: str = "") -> str:
                             items=block.input.get("items", ""),
                             total=int(block.input.get("total", 0)),
                         )
+                        tool_order_created = True
                     elif block.name == "check_ship_date":
                         result = _exec_check_ship_date(
                             block.input.get("requested_date", ""),
@@ -2981,7 +2985,7 @@ def _call_claude(history: list, uid: str = "") -> str:
                     messages=current_history,
                     tools=TOOLS,
                 )
-            return r.content[0].text, tool_used
+            return r.content[0].text, tool_used, tool_order_created
         except anthropic.APIStatusError as e:
             # 額度不足 / 服務過載 → 不值得再試其他 model
             if "credit" in str(e).lower() or e.status_code == 529:
@@ -3173,9 +3177,10 @@ def ask(uid, msg):
     history = history[-10:]
     raw = None
     tool_used = False
+    tool_order_created = False
     for attempt in range(3):
         try:
-            raw, tool_used = _call_claude(history, uid)
+            raw, tool_used, tool_order_created = _call_claude(history, uid)
             break
         except anthropic.APIStatusError as e:
             print(f"[API_ERR] attempt={attempt+1} status={e.status_code} body={str(e)[:200]}")
@@ -3255,16 +3260,18 @@ def ask(uid, msg):
         clean = CALC_TAG.sub('', clean).strip()
         print(f"[TOOL_USED] 跳過舊機制備援")
 
-    # 全域過濾（不論 tool 有無，都執行）
-    clean = _auto_strip_invalid_time_warnings(clean, msg)
-    if not order_type:
-        clean = _strip_premature_time_comments(clean)
+    # 全域過濾（tool use 成功時跳過，避免誤刪工具回傳內容）
+    if not tool_used:
+        clean = _auto_strip_invalid_time_warnings(clean, msg)
+        if not order_type:
+            clean = _strip_premature_time_comments(clean)
 
     history.append(_msg_with_time("assistant", clean))
     set_history(uid, history)
     # 存 assistant 回覆到 chat_logs（背景執行）
     threading.Thread(target=_save_chat_log, args=(uid, "assistant", clean), daemon=True).start()
-    return clean, bool(order_info)
+    is_order = tool_order_created if tool_used else bool(order_info)
+    return clean, is_order
 
 
 _TIME_SENSITIVE = (
@@ -3273,14 +3280,19 @@ _TIME_SENSITIVE = (
     "有開", "有沒有開", "營業嗎", "開門嗎", "公休", "打烊", "出貨嗎",
 )
 
+_PRICE_QUERY_KW = ("多少錢", "幾元", "幾塊", "運費", "免運", "試算", "算一下", "計算", "總共", "合計")
+
 def ask_with_cache(uid, msg):
     """先查快取省 token；未命中才呼叫 Claude。有訂單或時間敏感的回答不快取。"""
     context_starts = ("那", "這", "剛", "你說", "您說", "之前", "上面")
     time_sensitive = any(kw in msg for kw in _TIME_SENSITIVE)
+    # 含數字的詢價訊息每次都要重新計算，不可快取
+    price_query = re.search(r'\d', msg) and any(kw in msg for kw in _PRICE_QUERY_KW)
     use_cache = (
         len(msg) >= 6
         and not any(msg.startswith(w) for w in context_starts)
         and not time_sensitive
+        and not price_query
     )
 
     key = cache_key(msg)
@@ -3298,7 +3310,9 @@ def ask_with_cache(uid, msg):
     _reply_time_sensitive = any(kw in clean for kw in (
         "今天", "今日", "明天", "明日", "現在", "目前", "打烊", "公休", "已關",
     ))
-    if use_cache and not is_order and not _reply_time_sensitive:
+    # 包含總金額的回覆（calc_delivery/calc_pickup 工具結果）不快取，因結果依數量而異
+    reply_has_total = "總金額" in clean or "總計" in clean
+    if use_cache and not is_order and not _reply_time_sensitive and not reply_has_total:
         faq_cache[key] = clean
     return clean
 
