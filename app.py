@@ -776,6 +776,101 @@ def _save_order_record(order_type: str, order_info: str, reply_text: str, uid: s
         except Exception as e:
             print(f"[SUPA_ORDER_ERR] {e}")
 
+_BANK_INFO = (
+    "💳 **匯款資訊**\n"
+    "銀行代碼：807（永豐銀行）\n"
+    "帳號：16801800434858\n"
+    "戶名：詹益全\n\n"
+    "請於出貨前完成匯款，並在 LINE 回傳末四碼 📲"
+)
+
+def _exec_create_order(uid: str, name: str, phone: str, address: str,
+                       items: str, ship_date: str, total: int, shipping: int) -> dict:
+    """建立宅配訂單：驗證資料、寫入 Redis+Supabase、回傳確認訊息。"""
+    # 驗證電話
+    norm_phone = normalize_phone(phone)
+    if not _is_tw_phone(norm_phone):
+        return {"success": False, "error": f"電話格式錯誤：{phone}，請確認後重新輸入。"}
+    # 驗證地址非假值
+    _FAKE_ADDR = {"系統已記錄", "已記錄", "同上", "同前", "同之前"}
+    if not address or address.strip() in _FAKE_ADDR:
+        return {"success": False, "error": "地址未填寫或無效，請提供完整收件地址。"}
+    # 驗證出貨日
+    try:
+        from datetime import date as _date
+        sd = datetime.strptime(ship_date, "%Y-%m-%d").date()
+        full_dates = get_shipping_full_dates()
+        if sd.weekday() not in _SHIP_WEEKDAYS or ship_date in full_dates:
+            return {"success": False, "error": f"出貨日 {ship_date} 不可用，請重新呼叫 check_ship_date 取得正確日期。"}
+    except ValueError:
+        return {"success": False, "error": f"出貨日格式錯誤：{ship_date}"}
+    # Python 重新驗算金額
+    delivery_days = get_delivery_days()
+    recv_date = (datetime.strptime(ship_date, "%Y-%m-%d") + timedelta(days=delivery_days)).strftime("%Y-%m-%d")
+    weekday_names = ["週一","週二","週三","週四","週五","週六","週日"]
+    sd_obj = datetime.strptime(ship_date, "%Y-%m-%d")
+    ship_weekday = weekday_names[sd_obj.weekday()]
+    recv_obj = datetime.strptime(recv_date, "%Y-%m-%d")
+    recv_weekday = weekday_names[recv_obj.weekday()]
+    # 寫入訂單
+    order_info = f"{name}|{norm_phone}|{address}|{items}|{ship_date}"
+    reply_text = f"宅配訂單 {items} 總金額 {total:,} 元"
+    _save_order_record("order", order_info, reply_text, uid=uid)
+    # 儲存客戶資料
+    save_customer_profile(uid, {"name": name, "phone": norm_phone, "address": address, "line_uid": uid})
+    set_has_order(uid)
+    shipping_note = "免運費 🎉" if shipping == 0 else f"運費 {shipping:,} 元"
+    confirm_msg = (
+        f"✅ 訂單已成立！\n\n"
+        f"**訂單明細**\n{items}\n{shipping_note}\n\n"
+        f"**出貨資訊**\n"
+        f"・出貨日：{ship_weekday} {ship_date}\n"
+        f"・預計收件：{recv_weekday} {recv_date}\n\n"
+        f"**收件資訊**\n"
+        f"・收件人：{name}\n"
+        f"・地址：{address}\n"
+        f"・電話：{norm_phone}\n\n"
+        f"{_BANK_INFO}\n\n"
+        f"**總金額：{total:,} 元**"
+    )
+    return {"success": True, "confirm_message": confirm_msg}
+
+
+def _exec_create_pickup(uid: str, name: str, phone: str,
+                        pickup_datetime: str, items: str, total: int) -> dict:
+    """建立門市自取訂單：驗證資料、寫入 Redis+Supabase、回傳確認訊息。"""
+    norm_phone = normalize_phone(phone)
+    if not _is_tw_phone(norm_phone):
+        return {"success": False, "error": f"電話格式錯誤：{phone}，請確認後重新輸入。"}
+    # 驗證取貨時間
+    time_check = _exec_validate_pickup_time(pickup_datetime)
+    if not time_check.get("valid"):
+        return {"success": False, "error": time_check.get("message", "取貨時間無效")}
+    try:
+        dt = datetime.strptime(pickup_datetime, "%Y-%m-%d %H:%M")
+        weekday_names = ["週一","週二","週三","週四","週五","週六","週日"]
+        pickup_weekday = weekday_names[dt.weekday()]
+    except ValueError:
+        return {"success": False, "error": f"取貨時間格式錯誤：{pickup_datetime}"}
+    # 寫入訂單
+    order_info = f"{name}|{norm_phone}|{pickup_datetime}|{items}"
+    reply_text = f"自取訂單 {items} 總金額 {total:,} 元"
+    _save_order_record("pickup", order_info, reply_text, uid=uid)
+    save_customer_profile(uid, {"name": name, "phone": norm_phone, "line_uid": uid})
+    set_has_order(uid)
+    confirm_msg = (
+        f"✅ 自取訂單已成立！\n\n"
+        f"**訂單明細**\n{items}\n\n"
+        f"**取貨資訊**\n"
+        f"・取貨時間：{pickup_weekday} {pickup_datetime}\n"
+        f"・姓名：{name}\n"
+        f"・電話：{norm_phone}\n\n"
+        f"現場付款即可 😊\n\n"
+        f"**總金額：{total:,} 元**"
+    )
+    return {"success": True, "confirm_message": confirm_msg}
+
+
 def save_customer_profile(uid: str, profile: dict):
     """儲存客人資料至 Supabase（唯一真相）。
     - 遮罩資料（含 *）自動略過，不覆蓋現有資料。
@@ -2698,6 +2793,44 @@ TOOLS = [
             "required": ["date_type"],
         },
     },
+    {
+        "name": "create_order",
+        "description": (
+            "建立宅配訂單，寫入資料庫並回傳確認訊息與匯款資訊。"
+            "所有資料確認完整後才呼叫（姓名、電話、地址、品項、出貨日、金額）。"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name":      {"type": "string",  "description": "收件人姓名"},
+                "phone":     {"type": "string",  "description": "聯絡電話（台灣手機或市話）"},
+                "address":   {"type": "string",  "description": "完整收件地址"},
+                "items":     {"type": "string",  "description": "品項簡述，例：豆干絲50包"},
+                "ship_date": {"type": "string",  "description": "出貨日期 YYYY-MM-DD"},
+                "total":     {"type": "integer", "description": "總金額（含運費）"},
+                "shipping":  {"type": "integer", "description": "運費金額，免運填 0"},
+            },
+            "required": ["name", "phone", "address", "items", "ship_date", "total", "shipping"],
+        },
+    },
+    {
+        "name": "create_pickup",
+        "description": (
+            "建立門市自取訂單，寫入資料庫並回傳確認訊息。"
+            "所有資料確認完整後才呼叫（姓名、電話、取貨時間、品項、金額）。"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name":            {"type": "string",  "description": "客人姓名"},
+                "phone":           {"type": "string",  "description": "聯絡電話"},
+                "pickup_datetime": {"type": "string",  "description": "取貨時間 YYYY-MM-DD HH:MM"},
+                "items":           {"type": "string",  "description": "品項簡述"},
+                "total":           {"type": "integer", "description": "總金額"},
+            },
+            "required": ["name", "phone", "pickup_datetime", "items", "total"],
+        },
+    },
 ]
 
 
@@ -2750,6 +2883,26 @@ def _call_claude(history: list, uid: str = "") -> str:
                         elif block.name == "validate_pickup_time":
                             result = _exec_validate_pickup_time(
                                 block.input.get("pickup_datetime", ""),
+                            )
+                        elif block.name == "create_order":
+                            result = _exec_create_order(
+                                uid=uid,
+                                name=block.input.get("name", ""),
+                                phone=block.input.get("phone", ""),
+                                address=block.input.get("address", ""),
+                                items=block.input.get("items", ""),
+                                ship_date=block.input.get("ship_date", ""),
+                                total=int(block.input.get("total", 0)),
+                                shipping=int(block.input.get("shipping", 0)),
+                            )
+                        elif block.name == "create_pickup":
+                            result = _exec_create_pickup(
+                                uid=uid,
+                                name=block.input.get("name", ""),
+                                phone=block.input.get("phone", ""),
+                                pickup_datetime=block.input.get("pickup_datetime", ""),
+                                items=block.input.get("items", ""),
+                                total=int(block.input.get("total", 0)),
                             )
                         elif block.name == "check_ship_date":
                             result = _exec_check_ship_date(
