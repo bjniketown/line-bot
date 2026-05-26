@@ -3508,17 +3508,11 @@ def webhook():
                 reply(token, share_messages())
                 continue
 
-            rule = quick_rule_reply(text, uid)
-            if rule:
-                reply(token, rule)
-                continue
-
-            # ── Claude 呼叫 → debounce 合併分段訊息 ─────────────────────────
+            # ── 所有訊息一律進 debounce buffer，統一等待合併後處理 ──────────
             if not _daily_allowed(uid):
                 reply(token, "您今日的詢問次數已達上限，請明天再試，或直撥 04-25882881 😊")
                 continue
 
-            # 所有訊息一律 debounce 2.5 秒，等待分段訊息合併
             raw = _redis(["GET", f"pending:{uid}"]) or "[]"
             try:
                 pending = json.loads(raw)
@@ -3552,6 +3546,11 @@ def _debounce_worker(uid: str, seq: int):
     last_token = pending[-1]["token"]
     combined_text = "\n".join(p["text"] for p in pending)
     print(f"[DEBOUNCE] uid={uid} merged={len(pending)}則 text={combined_text[:80]}")
+    # 合併後先檢查 keyword rules，命中則直接回覆，不呼叫 Claude
+    rule = quick_rule_reply(combined_text, uid)
+    if rule:
+        reply(last_token, rule)
+        return
     _handle_claude(last_token, uid, combined_text)
 
 
