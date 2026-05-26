@@ -1672,9 +1672,9 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
 【客人資料比對（工具必須執行）】
 
 ▶ get_customer_profile 工具：當客人提供電話號碼，或明確表示要宅配／自取時，立即呼叫此工具。
-  - found=true → 直接顯示工具回傳的遮罩資料（姓名、電話、地址）給客人確認：
-    「請問這次訂購資料與上次相同嗎？（姓名：XX / 電話：XXXX / 地址：XXXX）」
-    客人說「一樣」→ 沿用；客人說「不同」→ 追問哪個部分要更改
+  - found=true → 將工具回傳的 display_message【原文輸出】給客人，不可改寫、不可省略、不可用「與上次相同」代替
+    客人說「一樣」→ 沿用資料，直接進入下一步
+    客人說「不同」→ 追問哪個部分要更改
   - found=false → 正常逐步收集姓名、電話、地址
   - ❌ 禁止在未呼叫此工具前自行假設客人是新客或回訪客
   - ❌ 禁止說「基於隱私考量不顯示地址」，工具已遮罩，直接顯示即可
@@ -1943,21 +1943,22 @@ def _exec_get_customer_profile(uid: str, phone: str = "") -> dict:
     masked_phone   = _mask_phone(p.get("phone", ""))
     masked_address = _mask_address(p.get("address", ""))
 
+    addr_line = f"・地址：{masked_address}\n" if masked_address else "・地址：（無上次收件地址，請詢問）\n"
+    display_message = (
+        f"查到您的回訪資料！請問這次的訂購資料與上次相同嗎？\n\n"
+        f"・姓名：{masked_name}\n"
+        f"・電話：{masked_phone}\n"
+        + addr_line
+        + "\n若有任何不同，請告訴我需要更改的部分 😊"
+    )
     result = {
         "found": True,
         "name":    masked_name,
         "phone":   masked_phone,
         "address": masked_address,
         "has_address": bool(p.get("address", "")),
-        "message": (
-            f"查到回訪客人資料：\n"
-            f"・姓名：{masked_name}\n"
-            f"・電話：{masked_phone}\n"
-            + (f"・上次收件地址：{masked_address}\n" if masked_address else "")
-            + "請直接顯示以上資料給客人確認，詢問：「請問這次的訂購資料與上次相同嗎？」"
-            "客人確認後直接進入下一步；客人說不同時追問哪個部分要更改。"
-            "電話與姓名已確認，不可再重複詢問。"
-        ),
+        "display_message": display_message,
+        "message": "工具已產生 display_message，請將 display_message 的內容原文輸出給客人，不可改寫或省略任何欄位。",
     }
     return result
 
