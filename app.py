@@ -2279,6 +2279,9 @@ def quick_rule_reply(text, uid=None):
     if any(kw in t for kw in ("自取", "店取", "門市取", "門市")) and \
        any(kw in t for kw in ("付款", "匯款", "轉帳", "帳號", "運費", "免運")):
         return None
+    # 訊息含數字（詢問特定數量價格）→ 跳過罐頭回覆，讓 Claude 呼叫計算 tool
+    if re.search(r'\d+', t) and any(kw in t for kw in ("多少錢", "幾元", "幾塊", "運費", "免運", "試算", "算一下", "計算")):
+        return None
     # 關鍵字比對（先做，避免「運費」等2字關鍵字被2字規則誤攔）
     for label, keywords, reply_text in KEYWORD_RULES:
         if any(kw in t for kw in keywords):
@@ -2594,6 +2597,28 @@ TOOLS = [
             "required": ["items"],
         },
     },
+    {
+        "name": "check_ship_date",
+        "description": (
+            "查詢最近可出貨日期，考量關店、繁盛期、滿檔與星期限制。"
+            "客人詢問何時出貨、何時收到、指定收件日期，或準備成立訂單需要填出貨日時呼叫。"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "requested_date": {
+                    "type": "string",
+                    "description": "客人指定的日期，格式 YYYY-MM-DD。若無指定則留空。",
+                },
+                "date_type": {
+                    "type": "string",
+                    "enum": ["next", "ship", "recv"],
+                    "description": "next=直接給最近可出貨日；ship=驗證客人指定的出貨日；recv=從收件日反推出貨日",
+                },
+            },
+            "required": ["date_type"],
+        },
+    },
 ]
 
 
@@ -2643,6 +2668,11 @@ def _call_claude(history: list, uid: str = "") -> str:
                             result = _exec_calc_delivery(block.input.get("items", []))
                         elif block.name == "calc_pickup":
                             result = _exec_calc_pickup(block.input.get("items", []))
+                        elif block.name == "check_ship_date":
+                            result = _exec_check_ship_date(
+                                block.input.get("requested_date", ""),
+                                block.input.get("date_type", "next"),
+                            )
                         else:
                             result = {"error": "unknown tool"}
                         print(f"[TOOL] {block.name} → {result}")
@@ -2689,6 +2719,79 @@ def _next_ship_date(from_date):
             return d
         d += timedelta(days=1)
     return from_date
+
+def _exec_check_ship_date(requested_date: str = "", date_type: str = "next") -> dict:
+    """計算最近可出貨日，考量關店、繁盛期、滿檔、星期限制。"""
+    from datetime import date as _date
+    # 關店模式優先
+    closed_days, closed_msg = _parse_store_closed()
+    if closed_days > 0:
+        return {
+            "available": False,
+            "store_closed": True,
+            "note": f"目前店家休息中：{closed_msg}，暫不接單。",
+        }
+    now = datetime.now(_TZ_TW)
+    today = now.date()
+    busy, busy_reason, busy_start, busy_end, busy_days = False, "", "", "", 1
+    bs = get_busy_season()
+    if bs[0]:
+        busy, busy_reason, busy_start, busy_end, busy_days = True, bs[0], bs[1], bs[2], bs[3]
+    delivery_days = get_delivery_days()
+
+    if date_type == "recv" and requested_date:
+        # 收件日反推出貨日
+        try:
+            recv_d = datetime.strptime(requested_date, "%Y-%m-%d").date()
+            ship_d = recv_d - timedelta(days=1)
+            # 驗證反推出貨日是否可用
+            full = get_shipping_full_dates()
+            if ship_d.weekday() in _SHIP_WEEKDAYS and ship_d.strftime("%Y-%m-%d") not in full and ship_d >= today:
+                actual_recv = ship_d + timedelta(days=delivery_days)
+                weekday_names = ["週一","週二","週三","週四","週五","週六","週日"]
+                note = f"出貨日 {ship_d.strftime('%m/%d')}（{weekday_names[ship_d.weekday()]}），預計 {actual_recv.strftime('%m/%d')} 收件"
+                if busy:
+                    note += f"（繁盛期，可能延遲 1-2 天）"
+                return {
+                    "available": True,
+                    "store_closed": False,
+                    "busy_season": busy,
+                    "busy_season_note": f"繁盛期：{busy_reason}，收件可能延遲 1-2 天" if busy else "",
+                    "ship_date": ship_d.strftime("%Y-%m-%d"),
+                    "recv_date": actual_recv.strftime("%Y-%m-%d"),
+                    "note": note,
+                }
+            else:
+                # 反推失敗，改給最近可出貨日
+                ship_d = _next_ship_date(today)
+        except Exception:
+            ship_d = _next_ship_date(today)
+    elif date_type == "ship" and requested_date:
+        try:
+            ship_d = datetime.strptime(requested_date, "%Y-%m-%d").date()
+            full = get_shipping_full_dates()
+            if ship_d.weekday() not in _SHIP_WEEKDAYS or ship_d.strftime("%Y-%m-%d") in full or ship_d < today:
+                ship_d = _next_ship_date(today)
+        except Exception:
+            ship_d = _next_ship_date(today)
+    else:
+        ship_d = _next_ship_date(today)
+
+    recv_d = ship_d + timedelta(days=delivery_days)
+    weekday_names = ["週一","週二","週三","週四","週五","週六","週日"]
+    note = f"最近可出貨日 {ship_d.strftime('%m/%d')}（{weekday_names[ship_d.weekday()]}），預計 {recv_d.strftime('%m/%d')} 收件"
+    if busy:
+        note += f"（繁盛期，可能延遲 1-2 天）"
+    return {
+        "available": True,
+        "store_closed": False,
+        "busy_season": busy,
+        "busy_season_note": f"繁盛期：{busy_reason}，收件可能延遲 1-2 天" if busy else "",
+        "ship_date": ship_d.strftime("%Y-%m-%d"),
+        "recv_date": recv_d.strftime("%Y-%m-%d"),
+        "note": note,
+    }
+
 
 def validate_ship_recv_date(text: str) -> str:
     """驗算 <<SHIPDATE:YYYY-MM-DD>> 或 <<RECVDATE:YYYY-MM-DD>> 標記，不合法時覆蓋為正確日期。"""
