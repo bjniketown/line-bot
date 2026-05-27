@@ -1934,6 +1934,10 @@ def _exec_get_customer_profile(uid: str, phone: str = "", order_type: str = "") 
     order_type: 'delivery'=宅配（顯示地址）, 'pickup'=自取（不顯示地址）"""
     p = get_customer_profile(uid) if uid else {}
 
+    # UID 查到的資料若 phone 是假電話（line_U 開頭），視為新客
+    if p and str(p.get("phone", "")).startswith("line_"):
+        p = {}
+
     # uid 查不到時改用電話查
     if not p and phone:
         norm = normalize_phone(phone)
