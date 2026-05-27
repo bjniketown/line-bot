@@ -643,8 +643,8 @@ def save_phone_profile(phone: str, profile: dict):
 
 def _mask_name(name: str) -> str:
     """姓名遮罩：保留第一個字，其餘以 * 代替。"""
-    if not name or len(name) < 2:
-        return name
+    if not name or not isinstance(name, str) or len(name) < 2:
+        return ""
     return name[0] + '*' * (len(name) - 1)
 
 def _is_clean_line_name(name: str) -> bool:
@@ -657,6 +657,8 @@ def _is_clean_line_name(name: str) -> bool:
 
 def _mask_phone(phone: str) -> str:
     """電話遮罩：保留前4碼和後2碼，中間以 * 代替。"""
+    if not phone or not isinstance(phone, str):
+        return ""
     p = normalize_phone(phone)
     if len(p) < 7:
         return phone
@@ -2835,8 +2837,9 @@ TOOLS = [
     {
         "name": "confirm_customer_data",
         "description": (
-            "客人確認資料後呼叫此工具：解遮罩取得真實資料、儲存客人修改、回傳 create_order 可用的完整資料。"
-            "get_customer_profile 顯示資料給客人確認後，必須呼叫此工具，不可直接跳到 create_order。"
+            "客人確認或提供資料後【必須】呼叫此工具，才能取得真實資料並儲存。"
+            "觸發時機：(1)客人說資料相同 (2)客人提供新的姓名/電話/地址 (3)任何資料有變動。"
+            "不呼叫此工具就呼叫 create_order 是嚴重錯誤，客人資料將不會被儲存。"
             "欄位含「*」表示客人說相同（沿用舊資料）；欄位不含「*」表示客人提供了新值。"
         ),
         "input_schema": {
