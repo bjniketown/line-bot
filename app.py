@@ -1538,6 +1538,7 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
 1. 語氣親切友善，稱呼對方「您」
 2. 回覆簡潔清楚，避免過長
 3. 能回答的問題請直接回答，不要動不動叫客人打電話，機器人的目的就是減少老闆接電話的次數
+   例外（優先級更高）：即時庫存數量、特殊客製需求、緊急損壞等需人工判斷的問題，才委託客服
 4. 【庫存回覆原則】客人詢問商品是否有貨、還有沒有、能不能買時：
    - 若目前無任何臨時公告：直接回覆「目前有貨，歡迎訂購 😊」
    - 若有【今日水餃售完】公告：額外提醒「水餃今日已售完，其他品項皆有供應」
@@ -1626,6 +1627,7 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
 13. 【宅配出貨日自動安排】出貨日由 check_ship_date 工具計算並驗證，工具回傳後直接告知客人，不得說「客服確認後通知」：
     - 宅配出貨日只有**週一、週三、週五**，絕對不可提出其他日期（週二、週四、週六、週日）作為出貨選項
     - 禁止承諾「加急」「特殊安排」「詢問看看」等不存在的服務；客人說趕時間，只能提供最近的合法出貨日
+    - 【系統自動鎖定】距出貨日不足 36 小時的日期，系統自動視為排程已滿（非人工操作），此時告知客人該日期無法出貨並推薦下一個可用日，不需解釋原因
     - 【客人指定收件日】若客人說的是「收件日」（如「5/13 收到」），需反推出貨日（收件日 -1 天），呼叫 check_ship_date 工具驗證：
       - 反推出貨日可出貨 → 直接確認
       - 反推出貨日不可出貨（非週一三五，或排程已滿）→ 必須告知無法在該日收件，並列出最近兩個可選方案（含各自出貨日與收件日）請客人選擇，不可直接改期而不說明
@@ -1722,7 +1724,7 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
   付款方式：現場現金支付，不主動提及匯款選項。
 
 ▶ 訂單修改流程（順序不可跳過）：
-  客人說「改成」「換成」「修改」「追加」等變動詞時：
+  客人說「改成」「換成」「修改」「追加」「再加」「減少」等變動詞時，若意圖不明確（如「我想再要 30 包」「再加 20 包」），應先詢問：「請問您是要修改之前的訂單，還是要另外再訂一筆新的呢？」確認後再進行。
   ① confirm_customer_data：確認客人資料，取得 confirmed_name、confirmed_phone、confirmed_address
   ② calc_delivery 或 calc_pickup：以修改後的品項重新計算，取得 total（自取另取 sauce_note）
   ③ modify_order：填入 confirmed_* 與 total，工具自動替換舊訂單
@@ -2862,6 +2864,7 @@ TOOLS = [
             "當客人提供電話號碼，或表示要宅配／自取時呼叫此工具。"
             "工具回傳資料後，直接顯示給客人確認是否沿用，不得自行假設或省略確認步驟。"
             "若客人為新客戶（無歷史資料），工具會告知，Claude 再正常收集資料。"
+            "客人的 LINE UID 由系統自動傳入，Claude 不需提供，只需傳入 phone 與 order_type 即可。"
         ),
         "input_schema": {
             "type": "object",
@@ -2928,6 +2931,8 @@ TOOLS = [
         "description": (
             "計算門市自取訂單的品項金額（不含運費）。"
             "客人詢問門市自取價格時呼叫。"
+            "與 calc_delivery 不同：需在每個品項傳入 type 指定包裝，門市自取預設一般包裝，客人未指定時 type 填「一般」。"
+            "花生與昆布一般包有 50 元和 100 元兩種份量，呼叫此工具前必須已向客人確認份量，price 填客人確認的金額。"
             "品項包含：豆干絲（一般60元/真空70元）、花生（一般50或100元/真空100元）、"
             "昆布（一般50或100元/真空100元）、油潑辣子（120元）、水餃（280元/包50顆）。"
             "回傳結果若含 sauce_note，必須原文附在報價後傳給客人，不可省略。"
@@ -3463,7 +3468,8 @@ def ask(uid, msg):
                 order_info = None
             else:
                 clean = _strip_time_warnings(clean)
-        # 訂單寫入
+        # 備援存檔（僅在 tool use 失敗時走此路徑）
+        # tool use 成功時資料已由 _exec_create_order/_exec_create_pickup 儲存，此處不會執行
         if order_info:
             set_has_order(uid)
             parts = order_info.split("|")
@@ -3514,11 +3520,15 @@ def ask_with_cache(uid, msg):
     time_sensitive = any(kw in msg for kw in _TIME_SENSITIVE)
     # 含數字的詢價訊息每次都要重新計算，不可快取
     price_query = re.search(r'\d', msg) and any(kw in msg for kw in _PRICE_QUERY_KW)
+    # 有訂單時的修改意圖不可快取，避免回傳舊訂單確認訊息
+    _MODIFY_KW = ("改", "換", "追加", "再加", "減少", "修改", "取消", "變更")
+    modify_intent = get_has_order(uid) and any(kw in msg for kw in _MODIFY_KW)
     use_cache = (
         len(msg) >= 6
         and not any(msg.startswith(w) for w in context_starts)
         and not time_sensitive
         and not price_query
+        and not modify_intent
     )
 
     key = cache_key(msg)
