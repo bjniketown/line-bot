@@ -203,7 +203,7 @@ def _analyze_personality(uid: str):
             "只輸出描述文字，不要加任何標題或說明。\n\n"
             f"{dialogue}"
         )
-        resp = anthropic_client.messages.create(
+        resp = claude.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=150,
             messages=[{"role": "user", "content": prompt}],
@@ -791,19 +791,20 @@ _BANK_INFO = (
     "請於出貨前完成匯款，並在 LINE 回傳末四碼 📲"
 )
 
-def _exec_create_order(uid: str, name: str, phone: str, address: str,
+def _exec_create_order(uid: str, confirmed_name: str, confirmed_phone: str, confirmed_address: str,
                        items: str, ship_date: str, total: int, shipping: int,
                        modify: bool = False) -> dict:
-    """建立宅配訂單：驗證資料、寫入 Redis+Supabase、回傳確認訊息。"""
-    if not name or not name.strip():
+    """建立宅配訂單：驗證資料、寫入 Redis+Supabase、回傳確認訊息。
+    confirmed_name/confirmed_phone/confirmed_address 必須來自 confirm_customer_data 工具。"""
+    if not confirmed_name or not confirmed_name.strip():
         return {"success": False, "error": "缺少收件人姓名，請先向客人確認姓名後再建立訂單。"}
-    # 驗證電話
-    norm_phone = normalize_phone(phone)
+    # 驗證電話（confirmed_phone 已正規化，直接驗證格式即可）
+    norm_phone = normalize_phone(confirmed_phone)
     if not _is_tw_phone(norm_phone):
-        return {"success": False, "error": f"電話格式錯誤：{phone}，請確認後重新輸入。"}
+        return {"success": False, "error": f"電話格式錯誤：{confirmed_phone}，請確認後重新輸入。"}
     # 驗證地址非假值
     _FAKE_ADDR = {"系統已記錄", "已記錄", "同上", "同前", "同之前"}
-    if not address or address.strip() in _FAKE_ADDR:
+    if not confirmed_address or confirmed_address.strip() in _FAKE_ADDR:
         return {"success": False, "error": "地址未填寫或無效，請提供完整收件地址。"}
     # 驗證出貨日
     try:
@@ -823,11 +824,11 @@ def _exec_create_order(uid: str, name: str, phone: str, address: str,
     recv_obj = datetime.strptime(recv_date, "%Y-%m-%d")
     recv_weekday = weekday_names[recv_obj.weekday()]
     # 寫入訂單
-    order_info = f"{name}|{norm_phone}|{address}|{items}|{ship_date}"
+    order_info = f"{confirmed_name}|{norm_phone}|{confirmed_address}|{items}|{ship_date}"
     reply_text = f"宅配訂單 {items} 總金額 {total:,} 元"
     _save_order_record("order", order_info, reply_text, uid=uid, modify=modify)
     # 儲存客戶資料
-    save_customer_profile(uid, {"name": name, "phone": norm_phone, "address": address, "line_uid": uid})
+    save_customer_profile(uid, {"name": confirmed_name, "phone": norm_phone, "address": confirmed_address, "line_uid": uid})
     set_has_order(uid)
     shipping_note = "免運費 🎉" if shipping == 0 else f"運費 {shipping:,} 元"
     confirm_msg = (
@@ -837,8 +838,8 @@ def _exec_create_order(uid: str, name: str, phone: str, address: str,
         f"・出貨日：{ship_weekday} {ship_date}\n"
         f"・預計收件：{recv_weekday} {recv_date}\n\n"
         f"**收件資訊**\n"
-        f"・收件人：{name}\n"
-        f"・地址：{address}\n"
+        f"・收件人：{confirmed_name}\n"
+        f"・地址：{confirmed_address}\n"
         f"・電話：{norm_phone}\n\n"
         f"{_BANK_INFO}\n\n"
         f"**總金額：{total:,} 元**"
@@ -846,16 +847,17 @@ def _exec_create_order(uid: str, name: str, phone: str, address: str,
     return {"success": True, "confirm_message": confirm_msg}
 
 
-def _exec_create_pickup(uid: str, name: str, phone: str,
+def _exec_create_pickup(uid: str, confirmed_name: str, confirmed_phone: str,
                         pickup_datetime: str, items: str, total: int,
                         sauce_note: str = "", modify: bool = False) -> dict:
     """建立門市自取訂單：驗證資料、寫入 Redis+Supabase、回傳確認訊息。
+    confirmed_name/confirmed_phone 必須來自 confirm_customer_data 工具。
     total 與 sauce_note 必須來自 calc_pickup 工具的回傳值。"""
-    if not name or not name.strip():
+    if not confirmed_name or not confirmed_name.strip():
         return {"success": False, "error": "缺少客人姓名，請先向客人確認姓名後再建立訂單。"}
-    norm_phone = normalize_phone(phone)
+    norm_phone = normalize_phone(confirmed_phone)
     if not _is_tw_phone(norm_phone):
-        return {"success": False, "error": f"電話格式錯誤：{phone}，請確認後重新輸入。"}
+        return {"success": False, "error": f"電話格式錯誤：{confirmed_phone}，請確認後重新輸入。"}
     # 驗證取貨時間
     time_check = _exec_validate_pickup_time(pickup_datetime)
     if not time_check.get("valid"):
@@ -867,17 +869,17 @@ def _exec_create_pickup(uid: str, name: str, phone: str,
     except ValueError:
         return {"success": False, "error": f"取貨時間格式錯誤：{pickup_datetime}"}
     # 寫入訂單
-    order_info = f"{name}|{norm_phone}|{pickup_datetime}|{items}"
+    order_info = f"{confirmed_name}|{norm_phone}|{pickup_datetime}|{items}"
     reply_text = f"自取訂單 {items} 總金額 {total:,} 元"
     _save_order_record("pickup", order_info, reply_text, uid=uid, modify=modify)
-    save_customer_profile(uid, {"name": name, "phone": norm_phone, "line_uid": uid})
+    save_customer_profile(uid, {"name": confirmed_name, "phone": norm_phone, "line_uid": uid})
     set_has_order(uid)
     confirm_msg = (
         f"✅ 自取訂單已成立！\n\n"
         f"**訂單明細**\n{items}\n\n"
         f"**取貨資訊**\n"
         f"・取貨時間：{pickup_weekday} {pickup_datetime}\n"
-        f"・姓名：{name}\n"
+        f"・姓名：{confirmed_name}\n"
         f"・電話：{norm_phone}\n\n"
         f"現場付款即可 😊\n\n"
         f"**總金額：{total:,} 元**"
@@ -959,25 +961,24 @@ def _exec_get_order_status(uid: str, phone: str = "") -> dict:
         }
 
 
-def _exec_modify_order(uid: str, name: str, phone: str, address: str,
+def _exec_modify_order(uid: str, confirmed_name: str, confirmed_phone: str, confirmed_address: str,
                        modify_type: str, items: str = "",
                        ship_date: str = "", pickup_datetime: str = "",
                        total: int = 0, shipping: int = 0,
                        sauce_note: str = "") -> dict:
     """修改訂單：刪除舊訂單，用新資料建立新訂單。
-    name/phone/address 必須來自 confirm_customer_data，total 必須來自 calc_* 工具。"""
-    norm_phone = normalize_phone(phone)
-    if not _is_tw_phone(norm_phone):
-        return {"success": False, "error": f"電話格式錯誤：{phone}"}
+    confirmed_name/confirmed_phone/confirmed_address 必須來自 confirm_customer_data。
+    total 必須來自 calc_* 工具。電話由 _exec_create_* 內部驗證，此處不重複 normalize。"""
     if modify_type == "delivery":
         result = _exec_create_order(
-            uid=uid, name=name, phone=norm_phone, address=address,
+            uid=uid, confirmed_name=confirmed_name, confirmed_phone=confirmed_phone,
+            confirmed_address=confirmed_address,
             items=items, ship_date=ship_date, total=total, shipping=shipping,
             modify=True,
         )
     elif modify_type == "pickup":
         result = _exec_create_pickup(
-            uid=uid, name=name, phone=norm_phone,
+            uid=uid, confirmed_name=confirmed_name, confirmed_phone=confirmed_phone,
             pickup_datetime=pickup_datetime, items=items, total=total,
             sauce_note=sauce_note, modify=True,
         )
@@ -1562,8 +1563,9 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
      ① 先問品項與數量
      ② 品項確認後問聯絡電話：「請問您的聯絡電話呢？我幫您確認是否有舊資料可以沿用 😊」
      ③ 收到電話後**立即呼叫 get_customer_profile 工具**（必須執行，不可跳過）
-        - found=true → display_message 原文輸出 → 客人確認後呼叫 confirm_customer_data → 取得 confirmed_name、confirmed_phone、confirmed_address → 進入 ④
-        - found=false（新客戶）→ 繼續收集：宅配需補問姓名＋地址；自取需補問姓名＋取貨時間 → 收集完畢後呼叫 confirm_customer_data → 取得 confirmed_name、confirmed_phone、confirmed_address → 進入 ④
+        - found=true → display_message 原文輸出 → 客人確認後呼叫 confirm_customer_data（遮罩欄位傳含 * 的值，變動欄位傳新值）→ 取得 confirmed_name、confirmed_phone、confirmed_address → 進入 ④
+        - found=false（新客戶）→ 繼續收集：宅配需補問姓名＋地址；自取需補問姓名＋取貨時間 → 收集完畢後**同樣必須呼叫 confirm_customer_data**（所有欄位傳真實新值，不含 *）→ 取得 confirmed_name、confirmed_phone、confirmed_address → 進入 ④
+        ⚠️ 新客與回頭客都必須呼叫 confirm_customer_data，不可跳過。此工具同時負責驗證與儲存客資。
      ④ 資料齊全後平行呼叫計算工具：
         - 宅配：calc_delivery + check_ship_date 同時呼叫
         - 自取：calc_pickup + validate_pickup_time 同時呼叫
@@ -1613,6 +1615,7 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
       ❌ 絕對禁止：用「現在幾點」去推算「距打烊還剩幾分鐘」再決定是否拒絕或建議改期。
       ✅ 唯一正確做法：取貨時間落在營業時段內 → 無條件直接確認，零評語，零但書。
       ✅ 例：現在 16:10，客人說「今天 17:30」→ 17:30 在 16:00–18:00 內 → 直接確認「好的，17:30 見！」，絕對不可提時間緊。
+      ⚠️ 唯一例外：距取貨時間不足 15 分鐘時，系統會自動拒絕（準備時間不足），此時告知客人建議直接到店即可，不需要再解釋時間緊的原因。
       違反此規則是最高等級錯誤，會直接造成客人流失，嚴重損害品牌形象。
       ══════════════════════════════════════════════════════
     - 【收集資料期間禁止評論時間】三項資料尚未齊全時，收到取貨時間只需說「好的，已記下 X 點」繼續收集下一項，絕對不可評論是否快打烊、是否來得及；時間驗證由系統在訂單完成時自動執行。
@@ -2012,6 +2015,10 @@ def _exec_confirm_customer_data(uid: str, name: str, phone: str, address: str) -
         norm = normalize_phone(phone) if phone and '*' not in phone else ""
         p = get_phone_profile(norm) if norm else {}
 
+    # 新客（無歷史資料）不應傳遮罩值，傳了代表流程錯誤
+    if not p and ('*' in name or '*' in phone):
+        return {"success": False, "error": "查無此客人舊資料，請提供完整的真實姓名與電話，不應傳入遮罩符號。"}
+
     real_name    = p.get("name", "")    if '*' in name    else name.strip()
     real_phone   = p.get("phone", "")   if '*' in phone   else normalize_phone(phone)
     real_address = p.get("address", "") if '*' in address  else address.strip()
@@ -2269,9 +2276,9 @@ def _exec_validate_pickup_time(pickup_datetime: str) -> dict:
             ),
         }
 
-    # 30 分鐘準備時間
+    # 15 分鐘準備時間
     diff_minutes = (dt - now).total_seconds() / 60
-    if diff_minutes < 30:
+    if diff_minutes < 15:
         return {
             "valid": False,
             "reason": "too_soon",
