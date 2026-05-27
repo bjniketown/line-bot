@@ -2091,7 +2091,26 @@ def _exec_calc_pickup(items: list) -> dict:
         total += s
         type_str = f"（{pkg_type}）" if pkg_type else ""
         detail.append(f"{name}{type_str} {qty}份 × {price}元 = {s:,}元")
-    return {"detail": detail, "total": total}
+
+    # 醬料說明：依豆干絲包數給提示
+    dougansi_qty = sum(
+        int(item.get("qty", 0))
+        for item in items
+        if item.get("name", "") == "豆干絲"
+    )
+    if 1 <= dougansi_qty <= 2:
+        sauce_note = "【醬料說明】蔥花、蒜泥水直接加入包裝，辣油獨立包裝。"
+    elif dougansi_qty == 3:
+        sauce_note = "【醬料說明】蔥花、蒜泥水直接加入包裝，辣油獨立包裝。再多買 1 包（共 4 包）即享全部醬料獨立包裝服務。"
+    elif dougansi_qty >= 4:
+        sauce_note = "【醬料說明】蔥花、蒜泥水、辣油全部獨立包裝。"
+    else:
+        sauce_note = ""
+
+    result = {"detail": detail, "total": total}
+    if sauce_note:
+        result["sauce_note"] = sauce_note
+    return result
 
 
 def _replace_total(text: str, total: int) -> str:
@@ -2885,6 +2904,7 @@ TOOLS = [
             "客人詢問門市自取價格時呼叫。"
             "品項包含：豆干絲（一般60元/真空70元）、花生（一般50或100元/真空100元）、"
             "昆布（一般50或100元/真空100元）、油潑辣子（120元）、水餃（280元/包50顆）。"
+            "回傳結果若含 sauce_note，必須原文附在報價後傳給客人，不可省略。"
         ),
         "input_schema": {
             "type": "object",
