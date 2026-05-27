@@ -959,11 +959,13 @@ def _exec_get_order_status(uid: str, phone: str = "") -> dict:
         }
 
 
-def _exec_modify_order(uid: str, phone: str, modify_type: str,
-                       name: str = "", address: str = "", items: str = "",
+def _exec_modify_order(uid: str, name: str, phone: str, address: str,
+                       modify_type: str, items: str = "",
                        ship_date: str = "", pickup_datetime: str = "",
-                       total: int = 0, shipping: int = 0) -> dict:
-    """修改訂單：刪除舊訂單，用新資料建立新訂單。"""
+                       total: int = 0, shipping: int = 0,
+                       sauce_note: str = "") -> dict:
+    """修改訂單：刪除舊訂單，用新資料建立新訂單。
+    name/phone/address 必須來自 confirm_customer_data，total 必須來自 calc_* 工具。"""
     norm_phone = normalize_phone(phone)
     if not _is_tw_phone(norm_phone):
         return {"success": False, "error": f"電話格式錯誤：{phone}"}
@@ -977,7 +979,7 @@ def _exec_modify_order(uid: str, phone: str, modify_type: str,
         result = _exec_create_pickup(
             uid=uid, name=name, phone=norm_phone,
             pickup_datetime=pickup_datetime, items=items, total=total,
-            modify=True,
+            sauce_note=sauce_note, modify=True,
         )
     else:
         return {"success": False, "error": f"modify_type 無效：{modify_type}"}
@@ -1716,7 +1718,12 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
   ⚠️ 跳過 calc_pickup 直接呼叫 create_pickup 是嚴重錯誤，total 與 sauce_note 將無從取得。
   付款方式：現場現金支付，不主動提及匯款選項。
 
-▶ 訂單修改：客人說「改成」「換成」「修改」「追加」等變動詞時，呼叫 modify_order 工具，工具會自動替換舊訂單。
+▶ 訂單修改流程（順序不可跳過）：
+  客人說「改成」「換成」「修改」「追加」等變動詞時：
+  ① confirm_customer_data：確認客人資料，取得 confirmed_name、confirmed_phone、confirmed_address
+  ② calc_delivery 或 calc_pickup：以修改後的品項重新計算，取得 total（自取另取 sauce_note）
+  ③ modify_order：填入 confirmed_* 與 total，工具自動替換舊訂單
+  ⚠️ 跳過 confirm_customer_data 或 calc_* 直接呼叫 modify_order 是嚴重錯誤。
 
 ▶ 備援標記（僅工具無法呼叫時使用）：
   宅配：<<ORDER:姓名|電話|收件地址|品項簡述|出貨日期>>
@@ -2998,21 +3005,24 @@ TOOLS = [
             "修改已成立的訂單（宅配或自取）。"
             "客人說要改地址、改時間、追加品項、變更數量時呼叫。"
             "會刪除舊訂單並建立新訂單。"
+            "呼叫前必須已完成：① confirm_customer_data（取得 confirmed_name、confirmed_phone、confirmed_address），② calc_delivery 或 calc_pickup（取得 total；自取需取得 sauce_note）。"
+            "所有 confirmed_* 欄位必須來自 confirm_customer_data 回傳值，total 必須來自 calc_* 回傳值，不得自行填入。"
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "phone":           {"type": "string",  "description": "客人電話（用於找舊訂單）"},
-                "modify_type":     {"type": "string",  "enum": ["delivery", "pickup"], "description": "訂單類型：delivery=宅配 / pickup=自取"},
-                "name":            {"type": "string",  "description": "收件人或客人姓名"},
-                "address":         {"type": "string",  "description": "宅配地址（宅配必填）"},
-                "items":           {"type": "string",  "description": "完整品項描述"},
-                "ship_date":       {"type": "string",  "description": "宅配出貨日 YYYY-MM-DD"},
-                "pickup_datetime": {"type": "string",  "description": "自取時間 YYYY-MM-DD HH:MM"},
-                "total":           {"type": "integer", "description": "總金額"},
-                "shipping":        {"type": "integer", "description": "運費，免運填 0"},
+                "confirmed_name":    {"type": "string",  "description": "客人姓名，必須來自 confirm_customer_data 回傳的 confirmed_name"},
+                "confirmed_phone":   {"type": "string",  "description": "聯絡電話，必須來自 confirm_customer_data 回傳的 confirmed_phone"},
+                "confirmed_address": {"type": "string",  "description": "宅配地址，必須來自 confirm_customer_data 回傳的 confirmed_address（自取填空字串）"},
+                "modify_type":       {"type": "string",  "enum": ["delivery", "pickup"], "description": "訂單類型：delivery=宅配 / pickup=自取"},
+                "items":             {"type": "string",  "description": "完整品項描述"},
+                "ship_date":         {"type": "string",  "description": "宅配出貨日 YYYY-MM-DD（宅配必填）"},
+                "pickup_datetime":   {"type": "string",  "description": "自取時間 YYYY-MM-DD HH:MM（自取必填）"},
+                "total":             {"type": "integer", "description": "總金額，必須來自 calc_delivery 或 calc_pickup 回傳的 total"},
+                "shipping":          {"type": "integer", "description": "運費，必須來自 calc_delivery 回傳的 shipping，免運填 0"},
+                "sauce_note":        {"type": "string",  "description": "醬料說明，自取時必須來自 calc_pickup 回傳的 sauce_note，宅配填空字串"},
             },
-            "required": ["phone", "modify_type", "name", "items", "total"],
+            "required": ["confirmed_name", "confirmed_phone", "confirmed_address", "modify_type", "items", "total", "shipping", "sauce_note"],
         },
     },
     {
@@ -3134,15 +3144,16 @@ def _call_claude(history: list, uid: str = "") -> str:
                     elif block.name == "modify_order":
                         result = _exec_modify_order(
                             uid=uid,
-                            phone=block.input.get("phone", ""),
+                            name=block.input.get("confirmed_name", ""),
+                            phone=block.input.get("confirmed_phone", ""),
+                            address=block.input.get("confirmed_address", ""),
                             modify_type=block.input.get("modify_type", ""),
-                            name=block.input.get("name", ""),
-                            address=block.input.get("address", ""),
                             items=block.input.get("items", ""),
                             ship_date=block.input.get("ship_date", ""),
                             pickup_datetime=block.input.get("pickup_datetime", ""),
                             total=int(block.input.get("total", 0)),
                             shipping=int(block.input.get("shipping", 0)),
+                            sauce_note=block.input.get("sauce_note", ""),
                         )
                         tool_order_created = True
                     elif block.name == "create_order":
