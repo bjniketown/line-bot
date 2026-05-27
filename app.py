@@ -534,13 +534,17 @@ def get_customer_profile(uid: str) -> dict:
     return get_phone_profile_by_uid(uid)
 
 def get_phone_profile_by_uid(uid: str) -> dict:
-    """用 line_uid 查 Supabase customers，回傳與 get_phone_profile 相同格式的 dict。"""
+    """用 line_uid 查 Supabase customers，回傳與 get_phone_profile 相同格式的 dict。
+    若查到的 phone 是假電話（line_ 開頭）表示尚未取得真實電話，回傳 {} 視為新客。"""
     if not SUPABASE_URL or not uid:
         return {}
     row = _supa_get("customers", {"line_uid": uid})
     if not row:
         return {}
     phone = row.get("phone", "")
+    # 假電話紀錄（尚無真實電話）→ 視為新客，不回傳
+    if phone.startswith("line_"):
+        return {}
     addrs = _supa_get_addresses(phone) if phone else []
     address = addrs[0].get("address", "") if addrs else ""
     return {
@@ -1556,12 +1560,13 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
      ① 先問品項與數量
      ② 品項確認後問聯絡電話：「請問您的聯絡電話呢？我幫您確認是否有舊資料可以沿用 😊」
      ③ 收到電話後**立即呼叫 get_customer_profile 工具**（必須執行，不可跳過）
-        - found=true → display_message 原文輸出 → 客人確認後呼叫 confirm_customer_data → 進入 ④
-        - found=false（新客戶）→ 繼續收集：宅配需補問姓名＋地址；自取需補問姓名＋取貨時間；直接進入 ④
+        - found=true → display_message 原文輸出 → 客人確認後呼叫 confirm_customer_data → 取得 confirmed_name、confirmed_phone、confirmed_address → 進入 ④
+        - found=false（新客戶）→ 繼續收集：宅配需補問姓名＋地址；自取需補問姓名＋取貨時間 → 收集完畢後呼叫 confirm_customer_data → 取得 confirmed_name、confirmed_phone、confirmed_address → 進入 ④
      ④ 資料齊全後平行呼叫計算工具：
         - 宅配：calc_delivery + check_ship_date 同時呼叫
         - 自取：calc_pickup + validate_pickup_time 同時呼叫
      ⑤ 工具計算完成後呼叫 create_order（宅配）或 create_pickup（自取）建立訂單
+        ⚠️ create_order 與 create_pickup 的客人欄位必須填入 confirm_customer_data 回傳的 confirmed_name／confirmed_phone／confirmed_address，不得自行輸入。跳過 confirm_customer_data 是嚴重錯誤。
    - 門市自取：品項 → 電話 → get_customer_profile → 姓名（新客才問）→ 取貨時間
    - 宅配：品項 → 電話 → get_customer_profile → 姓名＋地址（新客才問）
    - 【一次給全部資訊】若客人在同一則訊息中已提供品項、數量、取貨方式、日期，並同時附帶問題，正確做法是：先直接回答問題，再確認訂單資訊，請客人補上電話即可完成。不可把提問誤判為「尚未確認取貨方式」而重啟流程。
@@ -1941,10 +1946,6 @@ def _exec_get_customer_profile(uid: str, phone: str = "", order_type: str = "") 
     order_type: 'delivery'=宅配（顯示地址）, 'pickup'=自取（不顯示地址）"""
     p = get_customer_profile(uid) if uid else {}
 
-    # UID 查到的資料若 phone 是假電話（line_U 開頭），視為新客
-    if p and str(p.get("phone", "")).startswith("line_"):
-        p = {}
-
     # uid 查不到時改用電話查
     if not p and phone:
         norm = normalize_phone(phone)
@@ -2024,11 +2025,11 @@ def _exec_confirm_customer_data(uid: str, name: str, phone: str, address: str) -
 
     return {
         "success": True,
-        "name": real_name,
-        "phone": real_phone,
-        "address": real_address,
+        "confirmed_name":  real_name,
+        "confirmed_phone": real_phone,
+        "confirmed_address": real_address,
         "has_address": bool(real_address),
-        "message": f"資料已確認：姓名={real_name}，電話={real_phone}，地址={real_address or '（未提供）'}。請直接使用以上真實資料呼叫 create_order 或 create_pickup。",
+        "message": f"資料已確認。請將 confirmed_name={real_name}、confirmed_phone={real_phone}、confirmed_address={real_address or '（未提供）'} 填入 create_order 或 create_pickup，不得自行輸入或修改。",
     }
 
 
@@ -3018,42 +3019,43 @@ TOOLS = [
         "name": "create_order",
         "description": (
             "建立宅配訂單，寫入資料庫並回傳確認訊息與匯款資訊。"
-            "所有資料確認完整後才呼叫（姓名、電話、地址、品項、出貨日、金額）。"
+            "呼叫前必須已完成 confirm_customer_data，並將其回傳的 confirmed_name、confirmed_phone、confirmed_address 填入對應欄位，不得自行輸入或修改客人資料。"
+            "跳過 confirm_customer_data 直接呼叫 create_order 是嚴重錯誤。"
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "name":      {"type": "string",  "description": "收件人姓名"},
-                "phone":     {"type": "string",  "description": "聯絡電話（台灣手機或市話）"},
-                "address":   {"type": "string",  "description": "完整收件地址"},
+                "confirmed_name":    {"type": "string",  "description": "收件人姓名，必須來自 confirm_customer_data 回傳的 confirmed_name"},
+                "confirmed_phone":   {"type": "string",  "description": "聯絡電話，必須來自 confirm_customer_data 回傳的 confirmed_phone"},
+                "confirmed_address": {"type": "string",  "description": "收件地址，必須來自 confirm_customer_data 回傳的 confirmed_address"},
                 "items":     {"type": "string",  "description": "品項簡述，例：豆干絲50包"},
                 "ship_date": {"type": "string",  "description": "出貨日期 YYYY-MM-DD"},
-                "total":     {"type": "integer", "description": "總金額（含運費）"},
-                "shipping":  {"type": "integer", "description": "運費金額，免運填 0"},
+                "total":     {"type": "integer", "description": "總金額（含運費），必須來自 calc_delivery 回傳的 total"},
+                "shipping":  {"type": "integer", "description": "運費金額，必須來自 calc_delivery 回傳的 shipping，免運填 0"},
             },
-            "required": ["name", "phone", "address", "items", "ship_date", "total", "shipping"],
+            "required": ["confirmed_name", "confirmed_phone", "confirmed_address", "items", "ship_date", "total", "shipping"],
         },
     },
     {
         "name": "create_pickup",
         "description": (
             "建立門市自取訂單，寫入資料庫並回傳確認訊息。"
-            "呼叫前必須已完成：① validate_pickup_time 驗證取貨時間，② calc_pickup 計算金額。"
-            "total 必須填入 calc_pickup 回傳的 total 值，不得自行計算。"
-            "sauce_note 必須填入 calc_pickup 回傳的 sauce_note 值（無則填空字串）。"
+            "呼叫前必須已完成：① confirm_customer_data（取得 confirmed_name、confirmed_phone），② validate_pickup_time 驗證取貨時間，③ calc_pickup 計算金額（取得 total、sauce_note）。"
+            "所有 confirmed_* 欄位必須來自 confirm_customer_data 回傳值，total 與 sauce_note 必須來自 calc_pickup 回傳值，不得自行填入。"
+            "跳過任何前置工具直接呼叫 create_pickup 是嚴重錯誤。"
             "回傳的 confirm_message 請原文輸出給客人，不可改寫或省略。"
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "name":            {"type": "string",  "description": "客人姓名"},
-                "phone":           {"type": "string",  "description": "聯絡電話"},
+                "confirmed_name":  {"type": "string",  "description": "客人姓名，必須來自 confirm_customer_data 回傳的 confirmed_name"},
+                "confirmed_phone": {"type": "string",  "description": "聯絡電話，必須來自 confirm_customer_data 回傳的 confirmed_phone"},
                 "pickup_datetime": {"type": "string",  "description": "取貨時間 YYYY-MM-DD HH:MM"},
                 "items":           {"type": "string",  "description": "品項簡述（來自 calc_pickup 的 detail 內容）"},
                 "total":           {"type": "integer", "description": "總金額，必須來自 calc_pickup 回傳的 total"},
                 "sauce_note":      {"type": "string",  "description": "醬料說明，必須來自 calc_pickup 回傳的 sauce_note，無則填空字串"},
             },
-            "required": ["name", "phone", "pickup_datetime", "items", "total", "sauce_note"],
+            "required": ["confirmed_name", "confirmed_phone", "pickup_datetime", "items", "total", "sauce_note"],
         },
     },
 ]
@@ -3146,9 +3148,9 @@ def _call_claude(history: list, uid: str = "") -> str:
                     elif block.name == "create_order":
                         result = _exec_create_order(
                             uid=uid,
-                            name=block.input.get("name", ""),
-                            phone=block.input.get("phone", ""),
-                            address=block.input.get("address", ""),
+                            name=block.input.get("confirmed_name", ""),
+                            phone=block.input.get("confirmed_phone", ""),
+                            address=block.input.get("confirmed_address", ""),
                             items=block.input.get("items", ""),
                             ship_date=block.input.get("ship_date", ""),
                             total=int(block.input.get("total", 0)),
@@ -3158,8 +3160,8 @@ def _call_claude(history: list, uid: str = "") -> str:
                     elif block.name == "create_pickup":
                         result = _exec_create_pickup(
                             uid=uid,
-                            name=block.input.get("name", ""),
-                            phone=block.input.get("phone", ""),
+                            name=block.input.get("confirmed_name", ""),
+                            phone=block.input.get("confirmed_phone", ""),
                             pickup_datetime=block.input.get("pickup_datetime", ""),
                             items=block.input.get("items", ""),
                             total=int(block.input.get("total", 0)),
