@@ -844,8 +844,9 @@ def _exec_create_order(uid: str, name: str, phone: str, address: str,
 
 def _exec_create_pickup(uid: str, name: str, phone: str,
                         pickup_datetime: str, items: str, total: int,
-                        modify: bool = False) -> dict:
-    """建立門市自取訂單：驗證資料、寫入 Redis+Supabase、回傳確認訊息。"""
+                        sauce_note: str = "", modify: bool = False) -> dict:
+    """建立門市自取訂單：驗證資料、寫入 Redis+Supabase、回傳確認訊息。
+    total 與 sauce_note 必須來自 calc_pickup 工具的回傳值。"""
     if not name or not name.strip():
         return {"success": False, "error": "缺少客人姓名，請先向客人確認姓名後再建立訂單。"}
     norm_phone = normalize_phone(phone)
@@ -877,6 +878,8 @@ def _exec_create_pickup(uid: str, name: str, phone: str,
         f"現場付款即可 😊\n\n"
         f"**總金額：{total:,} 元**"
     )
+    if sauce_note:
+        confirm_msg += f"\n\n{sauce_note}"
     return {"success": True, "confirm_message": confirm_msg}
 
 
@@ -1701,7 +1704,11 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
   必要資料：收件人全名或公司名、收件地址、聯絡電話、品項與數量
   ⚠️ 回訪客的資料確認已由 get_customer_profile + confirm_customer_data 完成，create_order 收到的是已確認的真實資料，直接使用即可。新客地址空白時工具會回傳錯誤，屆時再補問。
 
-▶ 門市自取訂單：當客戶提供姓名、電話、預計取貨時間後，呼叫 create_pickup 工具建立訂單，工具會自動驗證取貨時間、計算金額並儲存訂單。
+▶ 門市自取訂單建立流程（順序不可跳過）：
+  ① validate_pickup_time：驗證取貨時間是否在營業時間內
+  ② calc_pickup：計算金額，取得 total 與 sauce_note
+  ③ create_pickup：填入 total 與 sauce_note（必須來自 calc_pickup 回傳值），建立訂單
+  ⚠️ 跳過 calc_pickup 直接呼叫 create_pickup 是嚴重錯誤，total 與 sauce_note 將無從取得。
   付款方式：現場現金支付，不主動提及匯款選項。
 
 ▶ 訂單修改：客人說「改成」「換成」「修改」「追加」等變動詞時，呼叫 modify_order 工具，工具會自動替換舊訂單。
@@ -3031,7 +3038,10 @@ TOOLS = [
         "name": "create_pickup",
         "description": (
             "建立門市自取訂單，寫入資料庫並回傳確認訊息。"
-            "所有資料確認完整後才呼叫（姓名、電話、取貨時間、品項、金額）。"
+            "呼叫前必須已完成：① validate_pickup_time 驗證取貨時間，② calc_pickup 計算金額。"
+            "total 必須填入 calc_pickup 回傳的 total 值，不得自行計算。"
+            "sauce_note 必須填入 calc_pickup 回傳的 sauce_note 值（無則填空字串）。"
+            "回傳的 confirm_message 請原文輸出給客人，不可改寫或省略。"
         ),
         "input_schema": {
             "type": "object",
@@ -3039,10 +3049,11 @@ TOOLS = [
                 "name":            {"type": "string",  "description": "客人姓名"},
                 "phone":           {"type": "string",  "description": "聯絡電話"},
                 "pickup_datetime": {"type": "string",  "description": "取貨時間 YYYY-MM-DD HH:MM"},
-                "items":           {"type": "string",  "description": "品項簡述"},
-                "total":           {"type": "integer", "description": "總金額"},
+                "items":           {"type": "string",  "description": "品項簡述（來自 calc_pickup 的 detail 內容）"},
+                "total":           {"type": "integer", "description": "總金額，必須來自 calc_pickup 回傳的 total"},
+                "sauce_note":      {"type": "string",  "description": "醬料說明，必須來自 calc_pickup 回傳的 sauce_note，無則填空字串"},
             },
-            "required": ["name", "phone", "pickup_datetime", "items", "total"],
+            "required": ["name", "phone", "pickup_datetime", "items", "total", "sauce_note"],
         },
     },
 ]
@@ -3152,6 +3163,7 @@ def _call_claude(history: list, uid: str = "") -> str:
                             pickup_datetime=block.input.get("pickup_datetime", ""),
                             items=block.input.get("items", ""),
                             total=int(block.input.get("total", 0)),
+                            sauce_note=block.input.get("sauce_note", ""),
                         )
                         tool_order_created = True
                     elif block.name == "check_ship_date":
