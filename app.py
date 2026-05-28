@@ -3271,12 +3271,16 @@ _RECVDATE_TAG  = re.compile(r'<<RECVDATE:(\d{4}-\d{2}-\d{2})>>', re.IGNORECASE)
 _SHIP_WEEKDAYS = {0, 2, 4}  # 週一=0, 週三=2, 週五=4
 
 def _next_ship_date(from_date):
-    """從指定日期起找最近可出貨日（週一三五且未滿檔）。"""
+    """從指定日期起找最近可出貨日（週一三五且未滿檔且未觸發 36 小時自動鎖定）。"""
     full = get_shipping_full_dates()
+    now  = datetime.now(_TZ_TW)
     d = from_date
     for _ in range(30):
         if d.weekday() in _SHIP_WEEKDAYS and d.strftime("%Y-%m-%d") not in full:
-            return d
+            d_midnight = datetime(d.year, d.month, d.day, tzinfo=_TZ_TW)
+            hours_left = (d_midnight - now).total_seconds() / 3600
+            if hours_left >= _AUTOLOCK_HOURS:
+                return d
         d += timedelta(days=1)
     return from_date
 
@@ -3306,7 +3310,9 @@ def _exec_check_ship_date(requested_date: str = "", date_type: str = "next") -> 
             ship_d = recv_d - timedelta(days=1)
             # 驗證反推出貨日是否可用
             full = get_shipping_full_dates()
-            if ship_d.weekday() in _SHIP_WEEKDAYS and ship_d.strftime("%Y-%m-%d") not in full and ship_d >= today:
+            _sd_midnight = datetime(ship_d.year, ship_d.month, ship_d.day, tzinfo=_TZ_TW)
+            _sd_hours_left = (_sd_midnight - now).total_seconds() / 3600
+            if ship_d.weekday() in _SHIP_WEEKDAYS and ship_d.strftime("%Y-%m-%d") not in full and ship_d >= today and _sd_hours_left >= _AUTOLOCK_HOURS:
                 actual_recv = ship_d + timedelta(days=delivery_days)
                 weekday_names = ["週一","週二","週三","週四","週五","週六","週日"]
                 note = f"出貨日 {ship_d.strftime('%m/%d')}（{weekday_names[ship_d.weekday()]}），預計 {actual_recv.strftime('%m/%d')} 收件"
