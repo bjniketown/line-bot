@@ -2831,7 +2831,6 @@ def share_messages():
 
 _MODELS = [
     "claude-haiku-4-5-20251001",  # 主力：最快最便宜
-    "claude-sonnet-4-6",          # fallback：Haiku 掛掉時頂上，貴但穩
 ]
 
 _CONVO_DATE_RE = re.compile(r'(\d{1,2})[/月](\d{1,2})')
