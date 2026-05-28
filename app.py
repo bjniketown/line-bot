@@ -2560,6 +2560,13 @@ def quick_rule_reply(text, uid=None):
             else:
                 store_reply = "非常抱歉，今日門市已經提前完售所以暫停接單 🙏\n若方便改天前來，歡迎告知預計取貨日期，我為您安排 😊\n宅配照常服務，如有需要也可改宅配喔！"
             return store_reply
+    # 週四固定公休：客人提到自取時立即攔截，不讓 Claude 收完資料才說公休
+    elif any(kw in t for kw in ("自取", "店取", "門市取", "取貨", "來店")):
+        if not _has_future_date(t) and datetime.now(_TZ_TW).weekday() == 3:
+            return ("今天是週四，門市固定公休，無法取貨 😔\n\n"
+                    "建議改約明天（週五）或其他營業日取貨，\n"
+                    "或改選宅配到府也可以喔！\n\n"
+                    "請問您希望預約哪一天來取，或改宅配呢？😊")
     # 完全比對（不分大小寫）
     exact = EXACT_REPLIES.get(t) or EXACT_REPLIES.get(t.lower())
     if exact:
@@ -3569,11 +3576,90 @@ def ask_with_cache(uid, msg):
     return clean
 
 
+_IMAGE_PROMPT = """你是老鄰居豆干絲的 LINE 客服 AI。客人傳來一張圖片，請判斷圖片內容並回覆。
+
+判斷規則：
+1. 若是【轉帳/匯款截圖】：
+   - 說明你已收到截圖
+   - 列出你能辨識的資訊（金額、最後5碼帳號、時間等，有幾項說幾項）
+   - 告知將通知老闆確認，確認後會盡快安排出貨
+   - 語氣親切，結尾加 😊
+
+2. 若是【LINE Pay / 街口支付 / 其他電子支付截圖】：
+   - 同上，說明已收到，列出可辨識資訊，告知確認後安排出貨
+
+3. 若是【商品相關截圖】（如官網、別人的商品等）：
+   - 依圖片內容回答客人可能的疑問
+
+4. 若是【其他截圖】（對話、地圖、發票等）：
+   - 描述你看到的內容，詢問客人需要什麼協助
+
+5. 若看不清楚圖片內容：
+   - 請客人告知圖片用途或重新傳送
+
+回覆用繁體中文，簡短親切，不要超過5句話。"""
+
+
+def _handle_image(uid: str, token: str, message_id: str):
+    """取得 LINE 圖片 → Claude Vision 分析 → 回覆客人。"""
+    try:
+        # 從 LINE 取得圖片 binary
+        r = requests.get(
+            f"https://api-data.line.me/v2/bot/message/{message_id}/content",
+            headers={"Authorization": f"Bearer {LINE_TOKEN}"},
+            timeout=15,
+        )
+        if not r.ok:
+            reply(token, "圖片讀取失敗，請稍後再試，或直接說明您的需求 😊")
+            return
+
+        content_type = r.headers.get("Content-Type", "image/jpeg")
+        # 只取 mime type 主體，去掉 charset 等額外資訊
+        media_type = content_type.split(";")[0].strip()
+        if media_type not in ("image/jpeg", "image/png", "image/gif", "image/webp"):
+            media_type = "image/jpeg"
+
+        img_b64 = base64.b64encode(r.content).decode("utf-8")
+
+        resp = claude.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=400,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": media_type,
+                            "data": img_b64,
+                        },
+                    },
+                    {"type": "text", "text": _IMAGE_PROMPT},
+                ],
+            }],
+        )
+        answer = resp.content[0].text.strip()
+        reply(token, answer)
+
+    except Exception as e:
+        print(f"[ERROR] _handle_image uid={uid} err={e}")
+        reply(token, "圖片處理發生錯誤，請稍後再試，或直接說明您的需求 😊")
+
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     if not verify(request.get_data(), request.headers.get("X-Line-Signature", "")):
         abort(400)
     for e in request.json.get("events", []):
+        if e["type"] == "message" and e["message"]["type"] == "image":
+            mid   = e["message"]["id"]
+            if _is_duplicate_event(mid):
+                continue
+            uid   = e["source"]["userId"]
+            token = e["replyToken"]
+            threading.Thread(target=_handle_image, args=(uid, token, mid), daemon=True).start()
+            continue
         if e["type"] == "message" and e["message"]["type"] == "text":
             mid   = e["message"]["id"]
             if _is_duplicate_event(mid):
