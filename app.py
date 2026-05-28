@@ -3227,18 +3227,26 @@ def _call_claude(history: list, uid: str = "") -> str:
                         "tool_use_id": block.id,
                         "content": json.dumps(result, ensure_ascii=False),
                     })
-                # 把 tool 結果加入歷史，再次呼叫 Claude
+                # 把 tool 結果加入歷史，再次呼叫 Claude（529 過載最多重試 3 次）
                 current_history = current_history + [
                     {"role": "assistant", "content": r.content},
                     {"role": "user", "content": tool_results},
                 ]
-                r = claude.messages.create(
-                    model=model,
-                    max_tokens=600,
-                    system=system_blocks,
-                    messages=current_history,
-                    tools=TOOLS,
-                )
+                for _retry in range(3):
+                    try:
+                        r = claude.messages.create(
+                            model=model,
+                            max_tokens=600,
+                            system=system_blocks,
+                            messages=current_history,
+                            tools=TOOLS,
+                        )
+                        break
+                    except anthropic.APIStatusError as e:
+                        if e.status_code == 529 and _retry < 2:
+                            time.sleep(3)
+                            continue
+                        raise
             return r.content[0].text, tool_used, tool_order_created
         except anthropic.APIStatusError as e:
             # 額度不足 / 服務過載 → 不值得再試其他 model
