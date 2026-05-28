@@ -2758,7 +2758,7 @@ def _handle_claude(token, uid, text):
             result_holder[0] = ask_with_cache(uid, text)
         except Exception as e:
             print(f"[WORKER_ERR] {type(e).__name__}: {str(e)[:200]}")
-            result_holder[0] = "很抱歉，剛才回應有點小狀況 😅 麻煩您再傳一次訊息，通常就會恢復正常！若仍有問題請直撥 04-25882881"
+            result_holder[0] = "哎呀，剛才網路有點小狀況 😅 沒能接收到您的訊息，麻煩再傳一次訊息給我，馬上為您服務！"
         finally:
             done.set()
 
@@ -3452,12 +3452,12 @@ def ask(uid, msg):
                     time.sleep(3)
                     continue
                 return "很抱歉，服務暫時忙碌，請稍後再試或直撥 04-25882881", False
-            return "很抱歉，剛才回應有點小狀況 😅 麻煩您再傳一次訊息，通常就會恢復正常！若仍有問題請直撥 04-25882881", False
+            return "哎呀，剛才網路有點小狀況 😅 沒能接收到您的訊息，麻煩再傳一次訊息給我，馬上為您服務！", False
         except Exception as e:
             print(f"[API_ERR] unexpected: {type(e).__name__}: {str(e)[:200]}")
-            return "很抱歉，剛才回應有點小狀況 😅 麻煩您再傳一次訊息，通常就會恢復正常！若仍有問題請直撥 04-25882881", False
+            return "哎呀，剛才網路有點小狀況 😅 沒能接收到您的訊息，麻煩再傳一次訊息給我，馬上為您服務！", False
     if raw is None:
-        return "很抱歉，剛才回應有點小狀況 😅 麻煩您再傳一次訊息，通常就會恢復正常！若仍有問題請直撥 04-25882881", False
+        return "哎呀，剛才網路有點小狀況 😅 沒能接收到您的訊息，麻煩再傳一次訊息給我，馬上為您服務！", False
 
     print(f"[RAW] {raw[:300]}")
 
