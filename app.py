@@ -3482,24 +3482,29 @@ def ask(uid, msg):
 
     print(f"[RAW] {raw[:300]}")
 
-    # ── 金額攔截：Claude 報了金額但沒呼叫 calc 工具 → 強制重問 ──────────
-    _PRICE_KW = ("免運費", "運費", "總金額", "總計", "元/包", "元/罐", "元/份")
+    # ── 金額攔截：Claude 報了結論性金額但沒呼叫 calc 工具 → 強制重問 ──────
+    # 只攔截結論性金額字眼（總金額、免運費等），不攔截單價介紹（70元/包）
+    _PRICE_KW = ("免運費", "**總金額", "總金額：", "總計：", "加收運費", "運費：\n", "運費 \n")
     _has_price_claim = any(kw in raw for kw in _PRICE_KW)
     if _has_price_claim and not calc_called and not tool_order_created:
-        print(f"[PRICE_INTERCEPT] 偵測到金額字眼但未呼叫 calc 工具，強制重問")
-        # 注入錯誤提示讓 Claude 重新計算
-        history.append({"role": "assistant", "content": raw})
-        history.append({"role": "user", "content":
-            "[系統攔截] 你剛才的回覆含有金額或運費說明，但未呼叫 calc_delivery 或 calc_pickup 工具驗算。"
-            "請立即呼叫正確的計算工具，以工具回傳結果為準，重新回覆客人。不可自行估算。"
-        })
+        print(f"[PRICE_INTERCEPT] 偵測到結論性金額但未呼叫 calc 工具，強制重問")
+        # 不汙染現有歷史，另起新的 history 重問
+        retry_history = history + [
+            {"role": "assistant", "content": raw},
+            {"role": "user", "content":
+                "[系統攔截] 你剛才的回覆含有總金額或運費結論，但未呼叫 calc_delivery 或 calc_pickup 工具驗算。"
+                "請立即呼叫正確的計算工具，以工具回傳結果為準，重新回覆客人。不可自行估算。"
+            },
+        ]
         try:
-            raw2, _, tool_order_created2, calc_called2 = _call_claude(history, uid)
+            raw2, _, tool_order_created2, calc_called2 = _call_claude(retry_history, uid)
             if calc_called2:
                 raw = raw2
                 tool_order_created = tool_order_created or tool_order_created2
                 calc_called = True
                 print(f"[PRICE_INTERCEPT] 重問成功，calc 工具已呼叫")
+            else:
+                print(f"[PRICE_INTERCEPT] 重問後仍未呼叫 calc，放行原始回覆")
         except Exception as e:
             print(f"[PRICE_INTERCEPT_ERR] {e}")
 
