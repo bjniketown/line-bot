@@ -3186,9 +3186,9 @@ def _call_claude(history: list, uid: str = "") -> str:
                     elif block.name == "modify_order":
                         result = _exec_modify_order(
                             uid=uid,
-                            name=block.input.get("confirmed_name", ""),
-                            phone=block.input.get("confirmed_phone", ""),
-                            address=block.input.get("confirmed_address", ""),
+                            confirmed_name=block.input.get("confirmed_name", ""),
+                            confirmed_phone=block.input.get("confirmed_phone", ""),
+                            confirmed_address=block.input.get("confirmed_address", ""),
                             modify_type=block.input.get("modify_type", ""),
                             items=block.input.get("items", ""),
                             ship_date=block.input.get("ship_date", ""),
@@ -3201,9 +3201,9 @@ def _call_claude(history: list, uid: str = "") -> str:
                     elif block.name == "create_order":
                         result = _exec_create_order(
                             uid=uid,
-                            name=block.input.get("confirmed_name", ""),
-                            phone=block.input.get("confirmed_phone", ""),
-                            address=block.input.get("confirmed_address", ""),
+                            confirmed_name=block.input.get("confirmed_name", ""),
+                            confirmed_phone=block.input.get("confirmed_phone", ""),
+                            confirmed_address=block.input.get("confirmed_address", ""),
                             items=block.input.get("items", ""),
                             ship_date=block.input.get("ship_date", ""),
                             total=int(block.input.get("total", 0)),
@@ -3213,8 +3213,8 @@ def _call_claude(history: list, uid: str = "") -> str:
                     elif block.name == "create_pickup":
                         result = _exec_create_pickup(
                             uid=uid,
-                            name=block.input.get("confirmed_name", ""),
-                            phone=block.input.get("confirmed_phone", ""),
+                            confirmed_name=block.input.get("confirmed_name", ""),
+                            confirmed_phone=block.input.get("confirmed_phone", ""),
                             pickup_datetime=block.input.get("pickup_datetime", ""),
                             items=block.input.get("items", ""),
                             total=int(block.input.get("total", 0)),
