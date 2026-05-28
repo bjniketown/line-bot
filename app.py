@@ -1715,6 +1715,7 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
 ▶ 宅配訂單：當客戶提供收件人全名（或公司名）、電話、地址、品項與數量後，呼叫 create_order 工具建立訂單，工具會自動計算金額、安排出貨日、附上匯款資訊並儲存訂單。
   必要資料：收件人全名或公司名、收件地址、聯絡電話、品項與數量
   ⚠️ 回訪客的資料確認已由 get_customer_profile + confirm_customer_data 完成，create_order 收到的是已確認的真實資料，直接使用即可。新客地址空白時工具會回傳錯誤，屆時再補問。
+  ⚠️【嚴禁謊報】「訂單已成立」或「訂單已更新」這類字眼，只能在 create_order / create_pickup / modify_order 工具實際回傳成功後才能說。若工具尚未被呼叫、或上一輪呼叫失敗，即使對話歷史中曾顯示訂單摘要，也必須重新呼叫工具，不可直接宣稱訂單已成立。
 
 ▶ 門市自取訂單建立流程（順序不可跳過）：
   ① validate_pickup_time：驗證取貨時間是否在營業時間內
@@ -2830,8 +2831,7 @@ def share_messages():
 
 _MODELS = [
     "claude-haiku-4-5-20251001",  # 主力：最快最便宜
-    "claude-haiku-4-5",           # fallback 1：舊版 haiku
-    "claude-haiku-3-5-20241022",  # fallback 2：上一代 haiku
+    "claude-haiku-4-5",           # fallback：別名，向後相容
 ]
 
 _CONVO_DATE_RE = re.compile(r'(\d{1,2})[/月](\d{1,2})')
