@@ -3446,12 +3446,12 @@ def ask(uid, msg):
         except anthropic.APIStatusError as e:
             print(f"[API_ERR] attempt={attempt+1} status={e.status_code} body={str(e)[:200]}")
             if "credit" in str(e).lower():
-                return "很抱歉，服務暫時無法使用，請直撥 04-25882881 😊", False
+                return "哎呀，剛才網路有點小狀況 😅 沒能接收到您的訊息，麻煩再傳一次訊息給我，馬上為您服務！", False
             if e.status_code == 529:
                 if attempt < 2:
                     time.sleep(3)
                     continue
-                return "很抱歉，服務暫時忙碌，請稍後再試或直撥 04-25882881", False
+                return "哎呀，剛才網路有點小狀況 😅 沒能接收到您的訊息，麻煩再傳一次訊息給我，馬上為您服務！", False
             return "哎呀，剛才網路有點小狀況 😅 沒能接收到您的訊息，麻煩再傳一次訊息給我，馬上為您服務！", False
         except Exception as e:
             print(f"[API_ERR] unexpected: {type(e).__name__}: {str(e)[:200]}")
