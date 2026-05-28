@@ -1991,6 +1991,11 @@ def _exec_get_customer_profile(uid: str, phone: str = "", order_type: str = "") 
             })
 
     if not p:
+        # 新客戶：電話已知，立即寫入 CRM，後續收到姓名/地址再補
+        if phone:
+            norm = normalize_phone(phone)
+            if norm:
+                save_customer_profile(uid, {"phone": norm, "line_uid": uid})
         msg = ("查無此客人歷史資料，為新客戶，請正常收集姓名、電話、取貨時間。"
                if order_type == "pickup" else
                "查無此客人歷史資料，為新客戶，請正常收集姓名、電話、地址。")
