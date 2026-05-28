@@ -2152,11 +2152,11 @@ def _exec_calc_pickup(items: list) -> dict:
         if item.get("name", "") == "豆干絲"
     )
     if 1 <= dougansi_qty <= 2:
-        sauce_note = "【醬料說明】蔥花、蒜泥水直接加入包裝，辣油獨立包裝。"
+        sauce_note = "【豆干絲醬料說明】蔥花、蒜泥水直接加入包裝，辣油獨立包裝。"
     elif dougansi_qty == 3:
-        sauce_note = "【醬料說明】蔥花、蒜泥水直接加入包裝，辣油獨立包裝。再多買 1 包（共 4 包）即享全部醬料獨立包裝服務。"
+        sauce_note = "【豆干絲醬料說明】蔥花、蒜泥水直接加入包裝，辣油獨立包裝。再多買 1 包（共 4 包）即享全部醬料獨立包裝服務。"
     elif dougansi_qty >= 4:
-        sauce_note = "【醬料說明】蔥花、蒜泥水、辣油全部獨立包裝。"
+        sauce_note = "【豆干絲醬料說明】蔥花、蒜泥水、辣油全部獨立包裝。"
     else:
         sauce_note = ""
 
