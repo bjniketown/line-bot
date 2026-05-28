@@ -3115,8 +3115,9 @@ TOOLS = [
 ]
 
 
-def _call_claude(history: list, uid: str = "") -> str:
-    """依序嘗試 _MODELS，第一個成功的回傳結果；全部失敗才丟例外。"""
+def _call_claude(history: list, uid: str = "") -> tuple:
+    """依序嘗試 _MODELS，第一個成功的回傳結果；全部失敗才丟例外。
+    回傳 (text, tool_used, tool_order_created, calc_called)"""
     current_msg = history[-1]["content"] if history and history[-1]["role"] == "user" else ""
     personality = _get_personality(uid)
     personality_block = f"【此客人溝通風格】{personality}" if personality else ""
@@ -3155,6 +3156,7 @@ def _call_claude(history: list, uid: str = "") -> str:
             # Tool use 迴圈：持續執行直到 Claude 不再要求 tool
             tool_used = False
             tool_order_created = False  # True 代表本輪有呼叫建立/修改訂單的工具
+            calc_called = False         # True 代表本輪有呼叫 calc_delivery 或 calc_pickup
             current_history = api_history[:]
             for _round in range(5):  # 最多 5 輪防無限迴圈
                 if r.stop_reason != "tool_use":
@@ -3179,8 +3181,10 @@ def _call_claude(history: list, uid: str = "") -> str:
                         )
                     elif block.name == "calc_delivery":
                         result = _exec_calc_delivery(block.input.get("items", []))
+                        calc_called = True
                     elif block.name == "calc_pickup":
                         result = _exec_calc_pickup(block.input.get("items", []))
+                        calc_called = True
                     elif block.name == "validate_pickup_time":
                         result = _exec_validate_pickup_time(block.input.get("pickup_datetime", ""))
                     elif block.name == "get_order_status":
@@ -3256,7 +3260,7 @@ def _call_claude(history: list, uid: str = "") -> str:
                             time.sleep(3)
                             continue
                         raise
-            return r.content[0].text, tool_used, tool_order_created
+            return r.content[0].text, tool_used, tool_order_created, calc_called
         except anthropic.APIStatusError as e:
             # 額度不足 / 服務過載 → 不值得再試其他 model
             if "credit" in str(e).lower() or e.status_code == 529:
@@ -3455,9 +3459,10 @@ def ask(uid, msg):
     raw = None
     tool_used = False
     tool_order_created = False
+    calc_called = False
     for attempt in range(3):
         try:
-            raw, tool_used, tool_order_created = _call_claude(history, uid)
+            raw, tool_used, tool_order_created, calc_called = _call_claude(history, uid)
             break
         except anthropic.APIStatusError as e:
             print(f"[API_ERR] attempt={attempt+1} status={e.status_code} body={str(e)[:200]}")
@@ -3476,6 +3481,27 @@ def ask(uid, msg):
         return "哎呀，剛才網路有點小狀況 😅 沒能接收到您的訊息，麻煩再傳一次訊息給我，馬上為您服務！", False
 
     print(f"[RAW] {raw[:300]}")
+
+    # ── 金額攔截：Claude 報了金額但沒呼叫 calc 工具 → 強制重問 ──────────
+    _PRICE_KW = ("免運費", "運費", "總金額", "總計", "元/包", "元/罐", "元/份")
+    _has_price_claim = any(kw in raw for kw in _PRICE_KW)
+    if _has_price_claim and not calc_called and not tool_order_created:
+        print(f"[PRICE_INTERCEPT] 偵測到金額字眼但未呼叫 calc 工具，強制重問")
+        # 注入錯誤提示讓 Claude 重新計算
+        history.append({"role": "assistant", "content": raw})
+        history.append({"role": "user", "content":
+            "[系統攔截] 你剛才的回覆含有金額或運費說明，但未呼叫 calc_delivery 或 calc_pickup 工具驗算。"
+            "請立即呼叫正確的計算工具，以工具回傳結果為準，重新回覆客人。不可自行估算。"
+        })
+        try:
+            raw2, _, tool_order_created2, calc_called2 = _call_claude(history, uid)
+            if calc_called2:
+                raw = raw2
+                tool_order_created = tool_order_created or tool_order_created2
+                calc_called = True
+                print(f"[PRICE_INTERCEPT] 重問成功，calc 工具已呼叫")
+        except Exception as e:
+            print(f"[PRICE_INTERCEPT_ERR] {e}")
 
     clean, order_type, order_info, is_modify = extract_order(raw)
 
