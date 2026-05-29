@@ -3260,7 +3260,9 @@ def _call_claude(history: list, uid: str = "") -> tuple:
                             time.sleep(3)
                             continue
                         raise
-            return r.content[0].text, tool_used, tool_order_created, calc_called
+            text_blocks = [b for b in r.content if hasattr(b, "text")]
+            final_text = text_blocks[0].text if text_blocks else ""
+            return final_text, tool_used, tool_order_created, calc_called
         except anthropic.APIStatusError as e:
             # 額度不足 / 服務過載 → 不值得再試其他 model
             if "credit" in str(e).lower() or e.status_code == 529:
