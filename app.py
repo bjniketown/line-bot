@@ -1723,21 +1723,25 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
   - ❌ 禁止跳過此工具直接呼叫 create_order（回訪客）
   - ❌ 禁止說「基於隱私考量不顯示地址」，工具已遮罩，直接顯示即可
 
+⚠️【工具呼叫後必須產生文字回覆】每次工具呼叫完成後，必須根據工具結果產生文字回覆給客人，絕對不可回傳空白或靜默。若工具結果是 found=false，必須說明並繼續收集資料；若工具結果是金額或時間，必須呈現給客人。
+
 ▶ 平行呼叫（加速）：以下工具互相獨立，可在同一輪同時呼叫：
   - calc_delivery + check_ship_date（資料確認後同時計算金額與出貨日）
   - calc_pickup + validate_pickup_time（資料確認後同時計算金額與驗證時間）
 
 【訂單建立（工具優先，標記備援）】
 
-▶ 宅配訂單：當客戶提供收件人全名（或公司名）、電話、地址、品項與數量後，呼叫 create_order 工具建立訂單，工具會自動計算金額、安排出貨日、附上匯款資訊並儲存訂單。
-  必要資料：收件人全名或公司名、收件地址、聯絡電話、品項與數量
-  ⚠️ 回訪客的資料確認已由 get_customer_profile + confirm_customer_data 完成，create_order 收到的是已確認的真實資料，直接使用即可。新客地址空白時工具會回傳錯誤，屆時再補問。
-  ⚠️【嚴禁謊報】「訂單已成立」或「訂單已更新」這類字眼，只能在 create_order / create_pickup / modify_order 工具實際回傳成功後才能說。若工具尚未被呼叫、或上一輪呼叫失敗，即使對話歷史中曾顯示訂單摘要，也必須重新呼叫工具，不可直接宣稱訂單已成立。
+▶ 宅配訂單建立流程（順序不可跳過）：
+  ① confirm_customer_data 完成後，同時呼叫 calc_delivery + check_ship_date
+  ② calc_delivery + check_ship_date 回傳後，**立即呼叫 create_order 建立訂單**，不需等客人說「確認」
+  ⚠️ 不可先顯示摘要等客人確認再建立訂單——這樣客人說「確認」時 Claude 不會呼叫工具，只會說「已成立」謊報。
+  ⚠️【嚴禁謊報】「訂單已成立」或「訂單已更新」這類字眼，只能在 create_order / create_pickup / modify_order 工具實際回傳成功後才能說。
+  ⚠️ 客人說「確認」時，若 create_order 尚未被呼叫，必須立即呼叫，不可直接宣稱訂單已成立。
 
 ▶ 門市自取訂單建立流程（順序不可跳過）：
   ① validate_pickup_time：驗證取貨時間是否在營業時間內
   ② calc_pickup：計算金額，取得 total 與 sauce_note
-  ③ create_pickup：填入 total 與 sauce_note（必須來自 calc_pickup 回傳值），建立訂單
+  ③ **立即呼叫 create_pickup 建立訂單**，不需等客人說「確認」
   ⚠️ 跳過 calc_pickup 直接呼叫 create_pickup 是嚴重錯誤，total 與 sauce_note 將無從取得。
   付款方式：現場現金支付，不主動提及匯款選項。
 
@@ -3292,6 +3296,26 @@ def _call_claude(history: list, uid: str = "") -> tuple:
                         raise
             text_blocks = [b for b in r.content if hasattr(b, "text")]
             final_text = text_blocks[0].text if text_blocks else ""
+            # 工具呼叫後回傳空字串 → 補一輪重試，要求 Claude 產生文字回覆
+            if not final_text.strip() and tool_used:
+                print(f"[EMPTY_REPLY] 工具呼叫後回傳空字串，補重試")
+                retry_history = current_history + [
+                    {"role": "assistant", "content": r.content},
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": r.content[-1].id if r.content else "x", "content": "請根據以上工具結果，用繁體中文回覆客人，不可回傳空白。"}]}
+                ] if r.content and r.content[-1].type == "tool_use" else current_history + [
+                    {"role": "user", "content": "請根據以上對話和工具結果，用繁體中文回覆客人，不可回傳空白。"}
+                ]
+                try:
+                    r2 = claude.messages.create(
+                        model=model, max_tokens=600,
+                        system=system_blocks, messages=retry_history, tools=TOOLS,
+                    )
+                    text_blocks2 = [b for b in r2.content if hasattr(b, "text")]
+                    if text_blocks2:
+                        final_text = text_blocks2[0].text
+                        print(f"[EMPTY_REPLY] 重試成功")
+                except Exception as e2:
+                    print(f"[EMPTY_REPLY_ERR] {e2}")
             return final_text, tool_used, tool_order_created, calc_called
         except anthropic.APIStatusError as e:
             # 額度不足 / 服務過載 → 不值得再試其他 model
