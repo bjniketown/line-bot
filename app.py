@@ -2086,6 +2086,18 @@ def _exec_confirm_customer_data(uid: str, name: str, phone: str, address: str) -
     }
 
 
+_NAME_NORMALIZE = {
+    "豆乾絲": "豆干絲", "豆乾": "豆干絲", "豆干": "豆干絲",
+    "辣油": "油潑辣子", "辣子": "油潑辣子", "油辣子": "油潑辣子",
+    "土豆": "花生", "花生米": "花生",
+    "海帶": "昆布", "昆布絲": "昆布",
+    "水餃": "水餃",
+}
+
+def _normalize_item_name(name: str) -> str:
+    return _NAME_NORMALIZE.get(name.strip(), name.strip())
+
+
 def _exec_calc_delivery(items: list) -> dict:
     """計算宅配訂單金額、運費、划算提醒。"""
     PRICES = {"豆干絲": 70, "花生": 100, "昆布": 100, "油潑辣子": 120}
@@ -2093,7 +2105,7 @@ def _exec_calc_delivery(items: list) -> dict:
     units = 0
     detail = []
     for item in items:
-        name = item.get("name", "")
+        name = _normalize_item_name(item.get("name", ""))
         qty = int(item.get("qty", 0))
         price = PRICES.get(name, 0)
         if price == 0:
@@ -2136,7 +2148,7 @@ def _exec_calc_pickup(items: list) -> dict:
     total = 0
     detail = []
     for item in items:
-        name = item.get("name", "")
+        name = _normalize_item_name(item.get("name", ""))
         qty = int(item.get("qty", 0))
         pkg_type = item.get("type", "")
         price = int(item.get("price", 0))
