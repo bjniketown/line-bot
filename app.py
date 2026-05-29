@@ -1743,6 +1743,7 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
   ② calc_pickup：計算金額，取得 total 與 sauce_note
   ③ **立即呼叫 create_pickup 建立訂單**，不需等客人說「確認」
   ⚠️ 跳過 calc_pickup 直接呼叫 create_pickup 是嚴重錯誤，total 與 sauce_note 將無從取得。
+  ⚠️ 即使 sauce_note 含有「建議多買 1 包」等提示，也必須先建立訂單，再把 sauce_note 附在訂單確認訊息後方。不可因 sauce_note 的建議而中斷流程等待客人確認。
   付款方式：現場現金支付，不主動提及匯款選項。
 
 ▶ 訂單修改流程（順序不可跳過）：
