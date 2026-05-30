@@ -3922,34 +3922,44 @@ body{font-family:'PingFang TC','Heiti TC','Microsoft JhengHei',serif;background:
 
 _STORE_JS = """
 const WD=['日','一','二','三','四','五','六'],DEL=new Set([1,3,5]);
-let vY,vM;
+const PAGE=9;
+let pageOffset=0;
 function toKey(d){return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')}
-function init(){const n=new Date();vY=n.getFullYear();vM=n.getMonth();render()}
-function changeMonth(x){vM+=x;if(vM>11){vM=0;vY++}else if(vM<0){vM=11;vY--}render()}
-function render(){
-  const now=new Date(),tk=toKey(now);
-  document.getElementById('mt').textContent=vY+'年'+(vM+1)+'月';
-  const sl=document.getElementById('sl');sl.innerHTML='';
-  const isCurrentMonth=(vY===now.getFullYear()&&vM===now.getMonth());
-  const d=new Date(vY,vM,1);
-  let shown=0;
-  while(d.getMonth()===vM){
+function getShipDays(startOffset,count){
+  const result=[],now=new Date();
+  const start=new Date(now);start.setHours(0,0,0,0);
+  const d=new Date(start);
+  let found=0,skip=0;
+  while(found<startOffset+count){
     if(DEL.has(d.getDay())){
-      const key=toKey(d),past=key<tk,today=key===tk,full=FD.has(key);
-      if(isCurrentMonth&&past){d.setDate(d.getDate()+1);continue;}
-      if(isCurrentMonth&&shown>=9){d.setDate(d.getDate()+1);continue;}
-      const cls=full?'fl':'av',stat=full?'🔴 排程滿檔':'✅ 可出貨';
-      const href='/store?token='+T+'&action='+(full?'shipping_open':'shipping_full')+'&date='+key;
-      const ds=(vM+1)+'/'+(d.getDate()+'').padStart(2,'0');
-      const row=document.createElement('div');
-      row.className='srow '+cls+(today?' hi':'');
-      row.innerHTML='<div class="sd"><span class="sd-m">'+ds+'</span><span class="sd-w">（'+WD[d.getDay()]+'）</span>'+(today?'<span class="td-p">今天</span>':'')+'</div>'
-        +'<div class="sr"><span class="ss">'+stat+'</span><a class="sb" href="'+href+'">'+(full?'恢復出貨':'排程滿檔')+'</a></div>';
-      sl.appendChild(row);
-      shown++;
+      if(found>=startOffset)result.push(new Date(d));
+      found++;
     }
     d.setDate(d.getDate()+1);
   }
+  return result;
+}
+function init(){pageOffset=0;render()}
+function changeMonth(x){pageOffset+=x*PAGE;if(pageOffset<0)pageOffset=0;render()}
+function render(){
+  const now=new Date(),tk=toKey(now);
+  const days=getShipDays(pageOffset,PAGE);
+  const startLabel=days.length?((days[0].getMonth()+1)+'/'+String(days[0].getDate()).padStart(2,'0')):'';
+  const endLabel=days.length?((days[days.length-1].getMonth()+1)+'/'+String(days[days.length-1].getDate()).padStart(2,'0')):'';
+  document.getElementById('mt').textContent=startLabel+' – '+endLabel;
+  document.getElementById('mnav-prev').style.visibility=pageOffset===0?'hidden':'visible';
+  const sl=document.getElementById('sl');sl.innerHTML='';
+  days.forEach(function(d){
+    const key=toKey(d),today=key===tk,full=FD.has(key);
+    const cls=full?'fl':'av',stat=full?'🔴 排程滿檔':'✅ 可出貨';
+    const href='/store?token='+T+'&action='+(full?'shipping_open':'shipping_full')+'&date='+key;
+    const ds=(d.getMonth()+1)+'/'+String(d.getDate()).padStart(2,'0');
+    const row=document.createElement('div');
+    row.className='srow '+cls+(today?' hi':'');
+    row.innerHTML='<div class="sd"><span class="sd-m">'+ds+'</span><span class="sd-w">（'+WD[d.getDay()]+'）</span>'+(today?'<span class="td-p">今天</span>':'')+'</div>'
+      +'<div class="sr"><span class="ss">'+stat+'</span><a class="sb" href="'+href+'">'+(full?'恢復出貨':'排程滿檔')+'</a></div>';
+    sl.appendChild(row);
+  });
   updatePreview();
 }
 function updatePreview(){
@@ -4121,7 +4131,7 @@ def store_admin():
         "<div class='sec-t'>宅配排程</div>"
         "<div class='card'><div class='card-bd'>"
         "<div class='mnav'>"
-        "<button class='mnav-b' onclick='changeMonth(-1)'>‹</button>"
+        "<button class='mnav-b' id='mnav-prev' onclick='changeMonth(-1)'>‹</button>"
         "<span class='mnav-t' id='mt'></span>"
         "<button class='mnav-b' onclick='changeMonth(1)'>›</button>"
         "</div>"
