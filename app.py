@@ -4803,6 +4803,36 @@ def orders_admin():
         from flask import redirect
         return redirect(f"/orders?token={token}&tab={tab}")
 
+    if action == "ready":
+        ready_key   = request.args.get("key", "")
+        ready_phone = request.args.get("phone", "")
+        if ready_key.startswith("order:"):
+            if SUPABASE_URL and ready_phone:
+                norm_ph = normalize_phone(ready_phone)
+                try:
+                    requests.patch(
+                        f"{SUPABASE_URL}/rest/v1/orders",
+                        headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
+                                 "Content-Type": "application/json", "Prefer": "return=minimal"},
+                        params={"phone": f"eq.{norm_ph}", "status": "eq.pending"},
+                        json={"status": "shipped"},
+                        timeout=5,
+                    )
+                except Exception as e:
+                    print(f"[READY_ERR] {e}")
+                try:
+                    cust = get_phone_profile(norm_ph)
+                    uid_to_push = cust.get("line_uid", "") if cust else ""
+                    if uid_to_push:
+                        ready_msg = "您的訂單已備妥，歡迎來門市取貨 😊"
+                        push_message(uid_to_push, ready_msg)
+                        print(f"[READY_NOTIFY] 已推播備貨通知 uid={uid_to_push[:12]}")
+                except Exception as e:
+                    print(f"[READY_NOTIFY_ERR] {e}")
+            _redis(["DEL", ready_key])
+        from flask import redirect
+        return redirect(f"/orders?token={token}&tab={tab}")
+
     if action == "delete":
         del_key = request.args.get("key", "")
         del_phone = request.args.get("phone", "")
@@ -4858,11 +4888,15 @@ def orders_admin():
         for r in rows:
             key = r.get("_key", "")
             phone = r.get("phone", "")
-            ship_url = f"/orders?token={token}&tab={tab_type}&action=ship&key={key}&phone={phone}"
             del_url  = f"/orders?token={token}&tab={tab_type}&action=delete&key={key}&phone={phone}"
-            ship_btn = f"<a href='{ship_url}' onclick=\"return confirm('確定標記為已出貨？')\" style='padding:4px 10px;background:#27ae60;color:#fff;border-radius:6px;text-decoration:none;font-size:12px;margin-right:4px'>已出貨</a>"
             del_btn  = f"<a href='{del_url}' onclick=\"return confirm('確定刪除此筆訂單？')\" style='padding:4px 10px;background:#c0392b;color:#fff;border-radius:6px;text-decoration:none;font-size:12px'>刪除</a>"
-            btns = ship_btn + del_btn
+            if tab_type == "delivery":
+                ship_url = f"/orders?token={token}&tab={tab_type}&action=ship&key={key}&phone={phone}"
+                action_btn = f"<a href='{ship_url}' onclick=\"return confirm('確定標記為已出貨？')\" style='padding:4px 10px;background:#27ae60;color:#fff;border-radius:6px;text-decoration:none;font-size:12px;margin-right:4px'>已出貨</a>"
+            else:
+                ready_url = f"/orders?token={token}&tab={tab_type}&action=ready&key={key}&phone={phone}"
+                action_btn = f"<a href='{ready_url}' onclick=\"return confirm('確定標記為已備貨？')\" style='padding:4px 10px;background:#1976d2;color:#fff;border-radius:6px;text-decoration:none;font-size:12px;margin-right:4px'>已備貨</a>"
+            btns = action_btn + del_btn
             if tab_type == "delivery":
                 html += (
                     f"<tr>"
