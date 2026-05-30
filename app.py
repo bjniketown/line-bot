@@ -4769,13 +4769,11 @@ def orders_admin():
     if action == "ship":
         ship_key = request.args.get("key", "")
         ship_phone = request.args.get("phone", "")
-        # 從 Redis 讀出訂單資料取得 created_at，再更新 Supabase status
         if ship_key.startswith("order:"):
-            raw = _redis(["GET", ship_key])
-            if raw and SUPABASE_URL and ship_phone:
+            if SUPABASE_URL and ship_phone:
+                norm_ph = normalize_phone(ship_phone)
                 try:
-                    r = json.loads(raw)
-                    norm_ph = normalize_phone(ship_phone)
+                    # 更新 Supabase status → shipped
                     requests.patch(
                         f"{SUPABASE_URL}/rest/v1/orders",
                         headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -4786,6 +4784,21 @@ def orders_admin():
                     )
                 except Exception as e:
                     print(f"[SHIP_ERR] {e}")
+                try:
+                    # 查客人 LINE UID，push 出貨通知
+                    cust = get_phone_profile(norm_ph)
+                    uid_to_push = cust.get("line_uid", "") if cust else ""
+                    if uid_to_push:
+                        ship_msg = (
+                            "貨品已於今日寄出。\n"
+                            "黑貓冷凍宅配單號如照片所示：\n"
+                            "查詢網址：https://www.t-cat.com.tw/Inquire/Trace.aspx\n"
+                            "客服專線：412-8888（手機直撥請加02）"
+                        )
+                        push_message(uid_to_push, ship_msg)
+                        print(f"[SHIP_NOTIFY] 已推播出貨通知 uid={uid_to_push[:12]}")
+                except Exception as e:
+                    print(f"[SHIP_NOTIFY_ERR] {e}")
             _redis(["DEL", ship_key])
         from flask import redirect
         return redirect(f"/orders?token={token}&tab={tab}")
