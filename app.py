@@ -4346,34 +4346,33 @@ def customers_admin():
         except Exception:
             pass
 
-    # 批次撈 Redis 訂單，建立電話 → {count, last_type, last_date, orders[]} 對應表
+    # 從 Supabase 撈所有訂單（含已出貨），建立電話 → {count, last_type, last_date, orders[]} 對應表
     order_map = {}
     try:
-        all_order_keys = (_redis(["KEYS", "order:*:order"]) or []) + (_redis(["KEYS", "order:*:pickup"]) or [])
-        if all_order_keys:
-            all_vals = _redis(["MGET"] + all_order_keys) or []
-            for raw_o in all_vals:
-                if not raw_o:
-                    continue
-                try:
-                    r_o = json.loads(raw_o)
+        if SUPABASE_URL:
+            r_supa = requests.get(
+                f"{SUPABASE_URL}/rest/v1/orders",
+                headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+                params={"select": "phone,order_type,items,ship_date,pickup_time,created_at", "limit": "2000"},
+                timeout=8,
+            )
+            if r_supa.ok:
+                for r_o in r_supa.json():
                     ph = normalize_phone(r_o.get("phone", ""))
                     if not ph:
                         continue
                     if ph not in order_map:
                         order_map[ph] = {"count": 0, "last_type": "", "last_date": "", "orders": []}
                     order_map[ph]["count"] += 1
-                    o_date = (r_o.get("ship_date") or r_o.get("pickup_time", "")[:10] or r_o.get("time", "")[:10])
+                    o_date = (r_o.get("ship_date") or (r_o.get("pickup_time") or "")[:10] or (r_o.get("created_at") or "")[:10])
                     if o_date > order_map[ph]["last_date"]:
                         order_map[ph]["last_date"] = o_date
-                        order_map[ph]["last_type"] = r_o.get("type", "")
+                        order_map[ph]["last_type"] = r_o.get("order_type", "")
                     order_map[ph]["orders"].append({
                         "date": o_date,
-                        "type": r_o.get("type", ""),
+                        "type": r_o.get("order_type", ""),
                         "items": r_o.get("items", ""),
                     })
-                except Exception:
-                    pass
     except Exception:
         pass
 
@@ -4767,9 +4766,46 @@ def orders_admin():
                 pass
         return records
 
+    if action == "ship":
+        ship_key = request.args.get("key", "")
+        ship_phone = request.args.get("phone", "")
+        # 從 Redis 讀出訂單資料取得 created_at，再更新 Supabase status
+        if ship_key.startswith("order:"):
+            raw = _redis(["GET", ship_key])
+            if raw and SUPABASE_URL and ship_phone:
+                try:
+                    r = json.loads(raw)
+                    norm_ph = normalize_phone(ship_phone)
+                    requests.patch(
+                        f"{SUPABASE_URL}/rest/v1/orders",
+                        headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
+                                 "Content-Type": "application/json", "Prefer": "return=minimal"},
+                        params={"phone": f"eq.{norm_ph}", "status": "eq.pending"},
+                        json={"status": "shipped"},
+                        timeout=5,
+                    )
+                except Exception as e:
+                    print(f"[SHIP_ERR] {e}")
+            _redis(["DEL", ship_key])
+        from flask import redirect
+        return redirect(f"/orders?token={token}&tab={tab}")
+
     if action == "delete":
         del_key = request.args.get("key", "")
+        del_phone = request.args.get("phone", "")
         if del_key.startswith("order:"):
+            # 同步刪除 Supabase（真正取消訂單）
+            if SUPABASE_URL and del_phone:
+                try:
+                    norm_ph = normalize_phone(del_phone)
+                    requests.delete(
+                        f"{SUPABASE_URL}/rest/v1/orders",
+                        headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+                        params={"phone": f"eq.{norm_ph}", "status": "eq.pending"},
+                        timeout=5,
+                    )
+                except Exception as e:
+                    print(f"[DEL_ERR] {e}")
             _redis(["DEL", del_key])
         from flask import redirect
         return redirect(f"/orders?token={token}&tab={tab}")
@@ -4808,8 +4844,12 @@ def orders_admin():
         html = ""
         for r in rows:
             key = r.get("_key", "")
-            del_url = f"/orders?token={token}&tab={tab_type}&action=delete&key={key}"
-            del_btn = f"<a href='{del_url}' onclick=\"return confirm('確定刪除此筆訂單？')\" style='padding:4px 10px;background:#c0392b;color:#fff;border-radius:6px;text-decoration:none;font-size:12px'>刪除</a>"
+            phone = r.get("phone", "")
+            ship_url = f"/orders?token={token}&tab={tab_type}&action=ship&key={key}&phone={phone}"
+            del_url  = f"/orders?token={token}&tab={tab_type}&action=delete&key={key}&phone={phone}"
+            ship_btn = f"<a href='{ship_url}' onclick=\"return confirm('確定標記為已出貨？')\" style='padding:4px 10px;background:#27ae60;color:#fff;border-radius:6px;text-decoration:none;font-size:12px;margin-right:4px'>已出貨</a>"
+            del_btn  = f"<a href='{del_url}' onclick=\"return confirm('確定刪除此筆訂單？')\" style='padding:4px 10px;background:#c0392b;color:#fff;border-radius:6px;text-decoration:none;font-size:12px'>刪除</a>"
+            btns = ship_btn + del_btn
             if tab_type == "delivery":
                 html += (
                     f"<tr>"
@@ -4818,7 +4858,7 @@ def orders_admin():
                     f"<td>{r.get('phone','')}</td>"
                     f"<td style='font-size:11px'>{r.get('address','')}</td>"
                     f"<td style='font-size:11px'>{r.get('items','')}</td>"
-                    f"<td>{del_btn}</td>"
+                    f"<td>{btns}</td>"
                     f"</tr>"
                 )
             else:
@@ -4828,7 +4868,7 @@ def orders_admin():
                     f"<td>{r.get('name','')}</td>"
                     f"<td>{r.get('phone','')}</td>"
                     f"<td style='font-size:11px'>{r.get('items','')}</td>"
-                    f"<td>{del_btn}</td>"
+                    f"<td>{btns}</td>"
                     f"</tr>"
                 )
         return html
