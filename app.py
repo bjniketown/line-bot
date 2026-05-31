@@ -2748,7 +2748,7 @@ def push_message(uid, messages):
         print(f"[WARN] push_message exception: {e}")
 
 
-_FAST_TIMEOUT = 20  # 秒：reply token 有效期 30 秒，等 Claude 最長 20 秒用免費 reply；超時才用 push
+_FAST_TIMEOUT = 55  # 秒：reply token 有效期 60 秒，盡量等 Claude 跑完再用 reply，避免消耗 push 額度
 
 # ── 自動補單提醒 ────────────────────────────────────────────────────────────
 _ORDER_INTENT_RE = re.compile(
