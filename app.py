@@ -5130,7 +5130,7 @@ def recent_admin():
                 hist_lines += (
                     f"<div style='margin-bottom:6px'>"
                     f"<span style='font-size:11px;color:#888'>{t} {role}</span><br>"
-                    f"<span style='font-size:13px'>{str(content)[:120]}</span>"
+                    f"<span style='font-size:13px;white-space:pre-wrap'>{str(content)}</span>"
                     f"</div>"
                 )
             inject_form_s = (
