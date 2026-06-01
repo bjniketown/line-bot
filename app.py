@@ -38,6 +38,37 @@ def _supa_get(table: str, filters: dict) -> dict | None:
         pass
     return None
 
+def _supa_query(table: str, params: list, limit: int = 5000) -> list:
+    """查詢 Supabase 多筆資料，params 為 [(key, value), ...] 支援重複 key（如日期範圍）。"""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return []
+    try:
+        p = list(params) + [("limit", str(limit))]
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/{table}",
+            headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
+                     "Prefer": "count=none"},
+            params=p,
+            timeout=15,
+        )
+        if r.ok:
+            return r.json()
+    except Exception:
+        pass
+    return []
+
+
+def _parse_total_from_items(items_text: str) -> int:
+    """從 items 文字解析總金額（舊訂單無 total 欄位時使用）。"""
+    total = 0
+    for m in re.finditer(r'=\s*([\d,]+)元', items_text or ''):
+        try:
+            total += int(m.group(1).replace(',', ''))
+        except Exception:
+            pass
+    return total
+
+
 def _supa_upsert(table: str, record: dict):
     """新增或更新 Supabase 資料（以 phone 為主鍵 upsert）。"""
     if not SUPABASE_URL or not SUPABASE_KEY:
@@ -680,7 +711,7 @@ def _mask_address(address: str) -> str:
         return f"{prefix}****{suffix}"
     return address[:4] + '****'
 
-def _save_order_record(order_type: str, order_info: str, reply_text: str, uid: str = "", modify: bool = False):
+def _save_order_record(order_type: str, order_info: str, reply_text: str, uid: str = "", modify: bool = False, total: int = 0):
     """將成立的訂單存入 Redis 與 Supabase。
     Redis：key = order:{timestamp}:{type}，TTL 180 天。
     Supabase orders 表：永久保存，供標籤分析與歷史查詢使用。"""
@@ -756,6 +787,7 @@ def _save_order_record(order_type: str, order_info: str, reply_text: str, uid: s
             "ship_date":   record.get("ship_date") or None,
             "pickup_time": record.get("pickup_time") or None,
             "address":     record.get("address", ""),
+            "total":       total,
             "created_at":  now_tw.isoformat(),
         }
         if modify:
@@ -826,7 +858,7 @@ def _exec_create_order(uid: str, confirmed_name: str, confirmed_phone: str, conf
     # 寫入訂單
     order_info = f"{confirmed_name}|{norm_phone}|{confirmed_address}|{items}|{ship_date}"
     reply_text = f"宅配訂單 {items} 總金額 {total:,} 元"
-    _save_order_record("order", order_info, reply_text, uid=uid, modify=modify)
+    _save_order_record("order", order_info, reply_text, uid=uid, modify=modify, total=total)
     # 儲存客戶資料
     save_customer_profile(uid, {"name": confirmed_name, "phone": norm_phone, "address": confirmed_address, "line_uid": uid})
     set_has_order(uid)
@@ -871,7 +903,7 @@ def _exec_create_pickup(uid: str, confirmed_name: str, confirmed_phone: str,
     # 寫入訂單
     order_info = f"{confirmed_name}|{norm_phone}|{pickup_datetime}|{items}"
     reply_text = f"自取訂單 {items} 總金額 {total:,} 元"
-    _save_order_record("pickup", order_info, reply_text, uid=uid, modify=modify)
+    _save_order_record("pickup", order_info, reply_text, uid=uid, modify=modify, total=total)
     save_customer_profile(uid, {"name": confirmed_name, "phone": norm_phone, "line_uid": uid})
     set_has_order(uid)
     confirm_msg = (
@@ -5185,6 +5217,255 @@ def recent_admin():
         "<thead><tr><th>最後對話</th><th>顯示名稱</th><th>最後訊息</th><th>LINE UID</th><th>注入記憶</th></tr></thead>"
         f"<tbody>{table_rows}</tbody>"
         "</table>"
+        "</body></html>"
+    )
+
+
+@app.route("/report")
+def report_admin():
+    from calendar import monthrange
+    token = request.args.get("token", "")
+    if not ADMIN_TOKEN or token != ADMIN_TOKEN:
+        abort(403)
+
+    # 月份參數，預設上個月
+    now_tw = datetime.now(_TZ_TW)
+    default_month = (now_tw.replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
+    month_str = request.args.get("month", default_month)
+    try:
+        year, month = int(month_str[:4]), int(month_str[5:7])
+    except Exception:
+        year, month = int(default_month[:4]), int(default_month[5:7])
+
+    # 手動存友淨成長
+    friends_action = request.args.get("action", "")
+    if friends_action == "save_friends":
+        friends_val = request.args.get("friends", "").strip()
+        if friends_val.lstrip("-").isdigit():
+            _redis(["SET", f"report_friends:{month_str}", friends_val, "EX", 7776000])
+        from flask import redirect
+        return redirect(f"/report?token={token}&month={month_str}")
+
+    # 強制重算
+    force = request.args.get("force", "") == "1"
+    cache_key = f"report_cache:{month_str}"
+    if not force:
+        cached = _redis(["GET", cache_key])
+        if cached:
+            try:
+                data = json.loads(cached)
+            except Exception:
+                data = None
+        else:
+            data = None
+    else:
+        data = None
+
+    if data is None:
+        # 計算月份範圍
+        last_day = monthrange(year, month)[1]
+        start = f"{year}-{month:02d}-01"
+        end   = f"{year}-{month:02d}-{last_day}"
+        # 上月範圍
+        if month == 1:
+            py, pm = year - 1, 12
+        else:
+            py, pm = year, month - 1
+        pm_last = monthrange(py, pm)[1]
+        pm_start = f"{py}-{pm:02d}-01"
+        pm_end   = f"{py}-{pm:02d}-{pm_last}"
+
+        def fetch_orders(s, e):
+            return _supa_query("orders", [
+                ("created_at", f"gte.{s}"),
+                ("created_at", f"lte.{e}T23:59:59"),
+            ])
+
+        orders     = fetch_orders(start, end)
+        prev_orders = fetch_orders(pm_start, pm_end)
+
+        # ── 指標計算 ──────────────────────────────────────────────
+        def calc_metrics(ords):
+            delivery = [o for o in ords if o.get("order_type") in ("宅配", "order")]
+            pickup   = [o for o in ords if o.get("order_type") in ("店取", "pickup")]
+            revenue  = 0
+            for o in ords:
+                t = o.get("total") or 0
+                if not t:
+                    t = _parse_total_from_items(o.get("items", ""))
+                revenue += t
+            phones = list({o["phone"] for o in ords if o.get("phone")})
+            return {
+                "delivery": len(delivery),
+                "pickup":   len(pickup),
+                "total_orders": len(ords),
+                "revenue":  revenue,
+                "phones":   phones,
+            }
+
+        cur  = calc_metrics(orders)
+        prev = calc_metrics(prev_orders)
+
+        # 回購率：本月下單的電話中，有在本月前下過單的比例
+        repeat = 0
+        if cur["phones"]:
+            prev_phones = set(prev["phones"])
+            # 也查更早的訂單
+            older = _supa_query("orders", [("created_at", f"lt.{start}")])
+            older_phones = {o["phone"] for o in older if o.get("phone")}
+            repeat = sum(1 for p in cur["phones"] if p in older_phones)
+        repurchase_rate = round(repeat / len(cur["phones"]) * 100) if cur["phones"] else 0
+
+        prev_repeat = 0
+        if prev["phones"]:
+            oldest = _supa_query("orders", [("created_at", f"lt.{pm_start}")])
+            oldest_phones = {o["phone"] for o in oldest if o.get("phone")}
+            prev_repeat = sum(1 for p in prev["phones"] if p in oldest_phones)
+        prev_repurchase = round(prev_repeat / len(prev["phones"]) * 100) if prev["phones"] else 0
+
+        # 沉睡客喚醒數：本月 updated_at 且有真實 line_uid + 之前有訂單
+        awakened = 0
+        new_uid_customers = _supa_query("customers", [
+            ("updated_at", f"gte.{start}"),
+            ("updated_at", f"lte.{end}T23:59:59"),
+            ("line_uid", "not.is.null"),
+            ("line_uid", "not.like.line_%"),
+        ])
+        cur_phones_set = set(cur["phones"])
+        older_phones2  = {o["phone"] for o in _supa_query("orders", [("created_at", f"lt.{start}")])}
+        for c in new_uid_customers:
+            ph = c.get("phone", "")
+            if ph in cur_phones_set and ph in older_phones2:
+                awakened += 1
+
+        prev_awakened = 0  # 上月喚醒數也需同樣邏輯，簡化為 0（無歷史快取）
+
+        data = {
+            "month":     month_str,
+            "cur":       cur,
+            "prev":      prev,
+            "repurchase_rate":  repurchase_rate,
+            "prev_repurchase":  prev_repurchase,
+            "awakened":         awakened,
+            "prev_awakened":    prev_awakened,
+        }
+
+        # Haiku 摘要
+        try:
+            summary_prompt = (
+                f"以下是老鄰居豆干絲 {month_str} 月份的 LINE 銷售數據，請用繁體中文寫一段100字以內的老闆摘要，"
+                f"重點說明本月亮點與需注意的地方，語氣親切務實：\n"
+                f"訂單數：{cur['total_orders']}（宅配{cur['delivery']}、自取{cur['pickup']}），"
+                f"較上月{'增加' if cur['total_orders']>=prev['total_orders'] else '減少'}{abs(cur['total_orders']-prev['total_orders'])}筆；"
+                f"營收：{cur['revenue']:,}元，"
+                f"較上月{'增加' if cur['revenue']>=prev['revenue'] else '減少'}{abs(cur['revenue']-prev['revenue']):,}元；"
+                f"回購率：{repurchase_rate}%；沉睡客喚醒：{awakened}人。"
+            )
+            import anthropic as _anthropic
+            _ac = _anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+            _resp = _ac.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=200,
+                messages=[{"role": "user", "content": summary_prompt}],
+            )
+            data["summary"] = _resp.content[0].text.strip()
+        except Exception as e:
+            data["summary"] = f"（摘要生成失敗：{e}）"
+
+        _redis(["SET", cache_key, json.dumps(data, ensure_ascii=False), "EX", 86400])
+
+    # 友淨成長（手動）
+    friends_val = _redis(["GET", f"report_friends:{month_str}"]) or ""
+
+    # ── 輔助：比較箭頭 ─────────────────────────────────────────────
+    def arrow(cur_v, prev_v, higher_is_good=True):
+        if prev_v == 0:
+            return ""
+        pct = round((cur_v - prev_v) / prev_v * 100)
+        if cur_v > prev_v:
+            color = "#2e7d32" if higher_is_good else "#c62828"
+            return f"<span style='color:{color}'>↑ {pct}%</span>"
+        elif cur_v < prev_v:
+            color = "#c62828" if higher_is_good else "#2e7d32"
+            return f"<span style='color:{color}'>↓ {abs(pct)}%</span>"
+        return "<span style='color:#888'>→ 0%</span>"
+
+    cur  = data["cur"]
+    prev = data["prev"]
+    rr   = data["repurchase_rate"]
+    prr  = data["prev_repurchase"]
+    awk  = data["awakened"]
+
+    def card(title, value, compare_html, note=""):
+        return (
+            f"<div style='background:#fff;border-radius:12px;padding:16px 20px;"
+            f"box-shadow:0 1px 4px rgba(0,0,0,.08);flex:1;min-width:180px'>"
+            f"<div style='font-size:12px;color:#888;margin-bottom:4px'>{title}</div>"
+            f"<div style='font-size:26px;font-weight:bold;color:#3b2a1a'>{value}</div>"
+            f"<div style='font-size:12px;margin-top:4px'>{compare_html}</div>"
+            f"{'<div style=\"font-size:11px;color:#aaa;margin-top:2px\">'+note+'</div>' if note else ''}"
+            f"</div>"
+        )
+
+    cards = (
+        card("LINE訂單數（宅配）", cur['delivery'],
+             arrow(cur['delivery'], prev['delivery']),
+             f"上月 {prev['delivery']} 筆") +
+        card("LINE訂單數（門市）", cur['pickup'],
+             arrow(cur['pickup'], prev['pickup']),
+             f"上月 {prev['pickup']} 筆") +
+        card("LINE營收", f"{cur['revenue']:,} 元",
+             arrow(cur['revenue'], prev['revenue']),
+             f"上月 {prev['revenue']:,} 元") +
+        card("回購率", f"{rr}%",
+             arrow(rr, prr),
+             f"上月 {prr}%") +
+        card("沉睡客喚醒", f"{awk} 人",
+             arrow(awk, data['prev_awakened']),
+             "本月綁定UID且有訂單的舊客")
+    )
+
+    return (
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        f"<title>老鄰居 CRM 報表 {month_str}</title>"
+        "<style>*{box-sizing:border-box;margin:0;padding:0}"
+        "body{font-family:system-ui,sans-serif;background:#fdf8f2;color:#3b2a1a;padding:16px}"
+        "h1{font-size:18px;margin-bottom:16px;color:#5c3d1e}"
+        ".cards{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:20px}"
+        "input[type=text]{padding:6px 10px;border:1px solid #c9a96e;border-radius:8px;font-size:13px}"
+        "button{padding:6px 14px;background:#5c3d1e;color:#fff;border:none;border-radius:8px;font-size:13px;cursor:pointer}"
+        "</style></head><body>"
+        f"<a href='/store?token={token}' style='display:inline-block;margin-bottom:12px;"
+        f"padding:7px 14px;background:#5c3d1e;color:#fff;border-radius:8px;text-decoration:none;font-size:13px'>← 回首頁</a>"
+        f"<h1>📊 老鄰居豆干絲 · CRM 月報</h1>"
+        # 月份選擇
+        f"<form method='get' action='/report' style='margin-bottom:16px;display:flex;gap:8px;align-items:center'>"
+        f"<input type='hidden' name='token' value='{token}'>"
+        f"<input type='month' name='month' value='{month_str}' style='padding:6px 10px;border:1px solid #c9a96e;border-radius:8px;font-size:13px'>"
+        f"<button type='submit'>查看</button>"
+        f"<a href='/report?token={token}&month={month_str}&force=1' style='padding:6px 14px;background:#888;color:#fff;border-radius:8px;text-decoration:none;font-size:13px'>🔄 重新計算</a>"
+        f"</form>"
+        # 好友淨成長（手動）
+        f"<div style='background:#fff;border-radius:12px;padding:16px 20px;box-shadow:0 1px 4px rgba(0,0,0,.08);margin-bottom:20px'>"
+        f"<div style='font-size:12px;color:#888;margin-bottom:8px'>① 好友淨成長（手動填入）</div>"
+        f"<form method='get' action='/report' style='display:flex;gap:8px;align-items:center'>"
+        f"<input type='hidden' name='token' value='{token}'>"
+        f"<input type='hidden' name='month' value='{month_str}'>"
+        f"<input type='hidden' name='action' value='save_friends'>"
+        f"<input type='text' name='friends' value='{friends_val}' placeholder='例：+25 或 -3' style='width:120px'>"
+        f"<button type='submit'>儲存</button>"
+        f"<span style='font-size:20px;font-weight:bold;margin-left:12px;color:#3b2a1a'>{friends_val or '—'}</span>"
+        f"</form>"
+        f"</div>"
+        # 5 個指標卡片
+        f"<div class='cards'>{cards}</div>"
+        # 老闆摘要
+        f"<div style='background:#5c3d1e;color:#fff;border-radius:12px;padding:16px 20px;margin-bottom:20px'>"
+        f"<div style='font-size:12px;opacity:.7;margin-bottom:6px'>📝 老闆摘要（AI 生成）</div>"
+        f"<div style='font-size:14px;line-height:1.6'>{data.get('summary','')}</div>"
+        f"</div>"
+        f"<p style='font-size:11px;color:#aaa'>資料來源：Supabase orders / customers｜快取 24 小時｜{data['month']} 月報表</p>"
         "</body></html>"
     )
 
