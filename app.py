@@ -5243,9 +5243,12 @@ def report_admin():
     # 手動存友淨成長
     friends_action = request.args.get("action", "")
     if friends_action == "save_friends":
-        friends_val = request.args.get("friends", "").strip()
-        if friends_val.lstrip("-").isdigit():
-            _redis(["SET", f"report_friends:{month_str}", friends_val, "EX", 7776000])
+        added_val   = request.args.get("friends_added", "").strip()
+        blocked_val = request.args.get("friends_blocked", "").strip()
+        if added_val.isdigit():
+            _redis(["SET", f"report_friends_added:{month_str}",   added_val,   "EX", 7776000])
+        if blocked_val.isdigit():
+            _redis(["SET", f"report_friends_blocked:{month_str}", blocked_val, "EX", 7776000])
         from flask import redirect
         return redirect(f"/report?token={token}&month={month_str}")
 
@@ -5377,8 +5380,12 @@ def report_admin():
 
         _redis(["SET", cache_key, json.dumps(data, ensure_ascii=False), "EX", 86400])
 
-    # 友淨成長（手動）
-    friends_val = _redis(["GET", f"report_friends:{month_str}"]) or ""
+    # 好友數據（手動）
+    friends_added   = _redis(["GET", f"report_friends_added:{month_str}"])   or ""
+    friends_blocked = _redis(["GET", f"report_friends_blocked:{month_str}"]) or ""
+    friends_net = ""
+    if friends_added.isdigit() and friends_blocked.isdigit():
+        friends_net = str(int(friends_added) - int(friends_blocked))
 
     # ── 輔助：比較箭頭 ─────────────────────────────────────────────
     def arrow(cur_v, prev_v, higher_is_good=True):
@@ -5451,15 +5458,23 @@ def report_admin():
         f"</form>"
         # 好友淨成長（手動）
         f"<div style='background:#fff;border-radius:12px;padding:16px 20px;box-shadow:0 1px 4px rgba(0,0,0,.08);margin-bottom:20px'>"
-        f"<div style='font-size:12px;color:#888;margin-bottom:8px'>① 好友淨成長（手動填入）</div>"
-        f"<form method='get' action='/report' style='display:flex;gap:8px;align-items:center'>"
+        f"<div style='font-size:12px;color:#888;margin-bottom:10px'>① 好友數統計（手動填入）</div>"
+        f"<form method='get' action='/report' style='display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end'>"
         f"<input type='hidden' name='token' value='{token}'>"
         f"<input type='hidden' name='month' value='{month_str}'>"
         f"<input type='hidden' name='action' value='save_friends'>"
-        f"<input type='text' name='friends' value='{friends_val}' placeholder='例：+25 或 -3' style='width:120px'>"
+        f"<div><div style='font-size:11px;color:#888;margin-bottom:4px'>新增好友</div>"
+        f"<input type='text' name='friends_added' value='{friends_added}' placeholder='例：30' style='width:90px'></div>"
+        f"<div><div style='font-size:11px;color:#888;margin-bottom:4px'>封鎖人數</div>"
+        f"<input type='text' name='friends_blocked' value='{friends_blocked}' placeholder='例：5' style='width:90px'></div>"
         f"<button type='submit'>儲存</button>"
-        f"<span style='font-size:20px;font-weight:bold;margin-left:12px;color:#3b2a1a'>{friends_val or '—'}</span>"
         f"</form>"
+        f"<div style='margin-top:12px;display:flex;gap:24px;font-size:14px'>"
+        f"<span>新增：<b>{friends_added or '—'}</b></span>"
+        f"<span>封鎖：<b>{friends_blocked or '—'}</b></span>"
+        f"<span style='color:{'#2e7d32' if friends_net and int(friends_net)>=0 else '#c62828'}'>"
+        f"淨成長：<b>{('+' if friends_net and int(friends_net)>0 else '') + (friends_net or '—')}</b></span>"
+        f"</div>"
         f"</div>"
         # 5 個指標卡片
         f"<div class='cards'>{cards}</div>"
