@@ -4115,6 +4115,9 @@ def store_admin():
         "<div style='margin-bottom:16px'>"
         f"<a href='/recent?token={token}' style='display:block;padding:12px;background:#6b4e8a;color:#fff;border-radius:10px;text-align:center;text-decoration:none;font-size:14px'>💬 UID 對話記憶</a>"
         "</div>"
+        "<div style='margin-bottom:16px'>"
+        f"<a href='/report?token={token}' style='display:block;padding:12px;background:#2e7d32;color:#fff;border-radius:10px;text-align:center;text-decoration:none;font-size:14px'>📊 CRM 月報</a>"
+        "</div>"
 
         # ── 門市接單 ──────────────────────────────────────────────────
         "<div class='sec-t'>門市接單</div>"
