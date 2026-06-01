@@ -5367,9 +5367,7 @@ def report_admin():
                 f"較上月{'增加' if cur['revenue']>=prev['revenue'] else '減少'}{abs(cur['revenue']-prev['revenue']):,}元；"
                 f"回購率：{repurchase_rate}%；沉睡客喚醒：{awakened}人。"
             )
-            import anthropic as _anthropic
-            _ac = _anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-            _resp = _ac.messages.create(
+            _resp = claude.messages.create(
                 model="claude-haiku-4-5-20251001",
                 max_tokens=200,
                 messages=[{"role": "user", "content": summary_prompt}],
