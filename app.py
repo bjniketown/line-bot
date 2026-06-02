@@ -220,7 +220,7 @@ def _analyze_personality(uid: str):
         r = requests.get(
             f"{SUPABASE_URL}/rest/v1/chat_logs",
             headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
-            params={"uid": f"eq.{uid}", "order": "created_at.desc", "limit": "60"},
+            params={"uid": f"eq.{uid}", "order": "created_at.desc", "limit": "100"},
             timeout=10,
         )
         if not r.ok or not r.json():
@@ -254,9 +254,9 @@ def _analyze_personality(uid: str):
         print(f"[PERSONALITY_ERR] {e}")
 
 def _maybe_analyze_personality(uid: str):
-    """每累積 30 則有效 user 訊息觸發一次人格分析（背景執行）"""
+    """每累積 50 則 user 訊息觸發一次人格分析（背景執行）"""
     count = _count_user_chat_logs(uid)
-    if count > 0 and count % 30 == 0:
+    if count > 0 and count % 50 == 0:
         threading.Thread(target=_analyze_personality, args=(uid,), daemon=True).start()
 
 def _get_personality(uid: str) -> str:
@@ -3541,10 +3541,9 @@ def validate_ship_recv_date(text: str) -> str:
 
 def ask(uid, msg):
     """呼叫 Claude，回傳 (乾淨文字, 是否有訂單)。"""
-    # 存有意義的 user 訊息到 chat_logs（背景執行）
-    if _is_meaningful_message(msg):
-        threading.Thread(target=_save_chat_log, args=(uid, "user", msg), daemon=True).start()
-        threading.Thread(target=_maybe_analyze_personality, args=(uid,), daemon=True).start()
+    # 所有 user 訊息都存入 chat_logs（供爭議查閱與訓練用）
+    threading.Thread(target=_save_chat_log, args=(uid, "user", msg), daemon=True).start()
+    threading.Thread(target=_maybe_analyze_personality, args=(uid,), daemon=True).start()
     # 每次對話都更新 LINE 名稱和頭像（背景執行）
     threading.Thread(target=_fetch_and_save_line_profile, args=(uid,), daemon=True).start()
     history = get_history(uid)
