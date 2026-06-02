@@ -305,7 +305,7 @@ def _fetch_and_save_line_profile(uid: str):
                 timeout=5,
             )
         else:
-            # 尚未建檔的客人，建立最基本記錄
+            # 尚未建檔：建假電話記錄保存訪客資訊，下單時會自動刪除並合併到真實電話記錄
             requests.post(
                 f"{SUPABASE_URL}/rest/v1/customers",
                 headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -1105,20 +1105,18 @@ def save_customer_profile(uid: str, profile: dict):
                 if fake_record.get("picture_url"):  extra["picture_url"]  = fake_record["picture_url"]
             save_phone_profile(phone, {"name": name, "phone": phone, "address": addr, "line_uid": uid, "notes": notes_val, **extra})
 
-    # 假電話紀錄處理完畢後刪除（避免 CRM 出現重複假電話客人）
-    if fake_record and phone:
-        fake_phone = fake_record.get("phone", "")
-        if fake_phone and fake_phone.startswith("line_"):
-            try:
-                requests.delete(
-                    f"{SUPABASE_URL}/rest/v1/customers",
-                    headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
-                    params={"phone": f"eq.{fake_phone}"},
-                    timeout=5,
-                )
-                print(f"[MERGE] 假電話紀錄已刪除 {fake_phone[:20]}")
-            except Exception as e:
-                print(f"[MERGE_ERR] {e}")
+    # 有真實電話時，直接刪除同一 line_uid 的假電話記錄（phone 開頭 line_）
+    if uid and phone and SUPABASE_URL:
+        try:
+            r_del = requests.delete(
+                f"{SUPABASE_URL}/rest/v1/customers?line_uid=eq.{uid}&phone=like.line_%25",
+                headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+                timeout=5,
+            )
+            if r_del.status_code == 204:
+                print(f"[MERGE] 已清除 {uid[:8]} 的假電話記錄")
+        except Exception as e:
+            print(f"[MERGE_ERR] {e}")
 
 def customer_profile_text(uid: str, current_msg: str = "") -> str:
     """回傳回訪客人打招呼提示（僅供識別稱呼用）。
