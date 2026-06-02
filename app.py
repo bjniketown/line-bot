@@ -1767,6 +1767,7 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
 【訂單建立（工具優先，標記備援）】
 
 ▶ 宅配訂單建立流程（順序不可跳過）：
+  ⚠️【呼叫 calc_delivery 前必須確認品項完整】呼叫前回顧客人在本次對話中提到的所有品項，將每一種品項都放入 items 陣列，一項都不能漏。若客人訂了豆干絲＋花生＋昆布，items 就必須有三項，漏傳任何一項都會導致運費計算錯誤。
   ① confirm_customer_data 完成後，同時呼叫 calc_delivery + check_ship_date
   ② calc_delivery + check_ship_date 回傳後，**立即呼叫 create_order 建立訂單**，不需等客人說「確認」
   ⚠️ 不可先顯示摘要等客人確認再建立訂單——這樣客人說「確認」時 Claude 不會呼叫工具，只會說「已成立」謊報。
@@ -1776,7 +1777,7 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
 ▶ 門市自取訂單建立流程（順序不可跳過）：
   ⚠️【禁止自行推算星期】客人提供日期（如「7/11」）但尚未給時間時，直接問幾點，絕對不可自行判斷或說出該日是星期幾。星期幾一律由 validate_pickup_time 工具驗證後才能說出。
   ① validate_pickup_time：驗證取貨時間是否在營業時間內
-  ② calc_pickup：計算金額，取得 total 與 sauce_note
+  ② calc_pickup：計算金額，取得 total 與 sauce_note。⚠️ 呼叫前回顧客人提到的所有品項，每一種都放入 items，不可遺漏任何一項。
   ③ **立即呼叫 create_pickup 建立訂單**，不需等客人說「確認」
   ⚠️ 跳過 calc_pickup 直接呼叫 create_pickup 是嚴重錯誤，total 與 sauce_note 將無從取得。
   ⚠️ 即使 sauce_note 含有「建議多買 1 包」等提示，也必須先建立訂單，再把 sauce_note 附在訂單確認訊息後方。不可因 sauce_note 的建議而中斷流程等待客人確認。
@@ -3015,7 +3016,7 @@ TOOLS = [
             "properties": {
                 "items": {
                     "type": "array",
-                    "description": "品項清單",
+                    "description": "品項清單。⚠️ 必須包含客人本次訂購的【全部品項】，不可只傳部分——漏傳任何一項會導致單位數計算錯誤、運費算錯。宅配最多可混搭4種：豆干絲、花生、昆布、油潑辣子，客人訂了幾種就傳幾種，一項都不能漏。例如豆干絲49包+花生1份+昆布2份，items 必須傳3項。",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -3045,7 +3046,7 @@ TOOLS = [
             "properties": {
                 "items": {
                     "type": "array",
-                    "description": "品項清單",
+                    "description": "品項清單。⚠️ 必須包含客人本次訂購的【全部品項】，不可只傳部分——漏傳任何一項會導致金額算錯。客人訂了幾種就傳幾種，一項都不能漏。",
                     "items": {
                         "type": "object",
                         "properties": {
