@@ -3822,6 +3822,10 @@ def webhook():
             # ── 自動記錄客戶名單 ─────────────────────────────────────────────
             register_customer(uid)
 
+            # ── 人工接管：暫停該客戶的機器人回覆 ────────────────────────────
+            if _redis(["GET", f"paused:{uid}"]):
+                continue
+
             if len(text) > 250:
                 reply(token, "您的訊息太長了，請簡短說明需求 😊")
                 continue
@@ -5118,6 +5122,24 @@ def recent_admin():
             return redirect(f"/recent?token={token}&inject_result=ok&inject_uid={uid_q}")
         return redirect(f"/recent?token={token}&inject_result=fail&inject_uid={uid_q}")
 
+    if action == "toggle_pause":
+        from flask import redirect
+        uid_q = request.args.get("uid", "").strip()
+        if uid_q:
+            if _redis(["GET", f"paused:{uid_q}"]):
+                _redis(["DEL", f"paused:{uid_q}"])
+            else:
+                _redis(["SET", f"paused:{uid_q}", "1"])
+        return redirect(f"/recent?token={token}")
+
+    # 查哪些 uid 已被暫停
+    paused_uids = set()
+    if rows:
+        paused_vals = _redis_pipeline([["GET", f"paused:{r['uid']}"] for r in rows])
+        for r, v in zip(rows, paused_vals):
+            if v:
+                paused_uids.add(r["uid"])
+
     # 建立表格列
     table_rows = ""
     for row in rows:
@@ -5134,7 +5156,16 @@ def recent_admin():
             f"border-radius:6px;font-size:12px;cursor:pointer;margin-left:4px'>寫入</button>"
             f"</form>"
         )
-        highlight = " background:#fff8e1;" if uid == inject_uid and inject_result == "ok" else ""
+        is_paused = uid in paused_uids
+        pause_label = "▶ 恢復" if is_paused else "⏸ 暫停"
+        pause_bg = "#4caf50" if is_paused else "#e57373"
+        pause_btn = (
+            f"<a href='/recent?token={token}&action=toggle_pause&uid={uid}' "
+            f"style='display:inline-block;padding:4px 10px;background:{pause_bg};color:#fff;"
+            f"border-radius:6px;font-size:12px;text-decoration:none;white-space:nowrap'>{pause_label}</a>"
+        )
+        row_bg = "background:#fff0f0;" if is_paused else ""
+        highlight = " background:#fff8e1;" if uid == inject_uid and inject_result == "ok" else row_bg
         table_rows += (
             f"<tr style='{highlight}'>"
             f"<td style='font-size:12px;color:#888'>{row['last_time']}</td>"
@@ -5142,6 +5173,7 @@ def recent_admin():
             f"<td style='font-size:11px;color:#666;max-width:160px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis'>{row['last_msg']}</td>"
             f"<td style='font-size:10px;color:#aaa;max-width:140px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis'>{uid}</td>"
             f"<td>{inject_form}</td>"
+            f"<td>{pause_btn}</td>"
             f"</tr>"
         )
 
@@ -5216,7 +5248,7 @@ def recent_admin():
         + search_block
         + "<p style='font-size:12px;color:#888;margin-bottom:12px'>最近 10 個有對話記錄的客人，點選列尾可直接注入記憶。</p>"
         "<table>"
-        "<thead><tr><th>最後對話</th><th>顯示名稱</th><th>最後訊息</th><th>LINE UID</th><th>注入記憶</th></tr></thead>"
+        "<thead><tr><th>最後對話</th><th>顯示名稱</th><th>最後訊息</th><th>LINE UID</th><th>注入記憶</th><th>人工接管</th></tr></thead>"
         f"<tbody>{table_rows}</tbody>"
         "</table>"
         "</body></html>"
