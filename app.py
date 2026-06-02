@@ -350,7 +350,7 @@ def current_date_text() -> str:
     # 未來 30 天日期對照表，供 Claude 直接查詢，禁止自行推算星期
     calendar = "【日期星期對照表，查表用，禁止自行推算】\n" + "  ".join(
         f"{(now + timedelta(days=i)).strftime('%m/%d')}({_WEEKDAYS[(now + timedelta(days=i)).weekday()]})"
-        for i in range(1, 31)
+        for i in range(1, 61)
     )
     # 台灣週次定義（強制使用）
     mon = now + timedelta(days=(0 - now.weekday()) % 7 or 7)  # 本週一（若今天是週一則取今天）
