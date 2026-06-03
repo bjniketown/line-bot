@@ -573,9 +573,22 @@ def get_phone_profile_by_uid(uid: str) -> dict:
     if not row:
         return {}
     phone = row.get("phone", "")
-    # 假電話紀錄（尚無真實電話）→ 視為新客，不回傳
+    # 假電話紀錄 → 再查一次排除假電話，找真實電話那筆
     if phone.startswith("line_"):
-        return {}
+        try:
+            r = requests.get(
+                f"{SUPABASE_URL}/rest/v1/customers",
+                headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+                params={"line_uid": f"eq.{uid}", "phone": "not.like.line_*", "limit": "1"},
+                timeout=5,
+            )
+            if r.ok and r.json():
+                row = r.json()[0]
+                phone = row.get("phone", "")
+            else:
+                return {}
+        except Exception:
+            return {}
     addrs = _supa_get_addresses(phone) if phone else []
     address = addrs[0].get("address", "") if addrs else ""
     return {
