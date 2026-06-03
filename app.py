@@ -1771,7 +1771,7 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
 19. 【素食確認】若客人詢問素食相關問題，且尚未確認是否為素食者，在**收集訂單資料期間**詢問一次即可：「請問您是素食者嗎？以便我們為您備餐。」訂單一旦成立或客人已明確表示是否素食，不得再重複詢問。素食者可食：豆干絲、天然昆布、香滷花生、油潑辣子；水餃含豬肉，素食者不可食。
 19. 【門市無餐具】客人詢問門市是否提供餐具，回覆：門市不提供餐具，請自行準備。
 20. 【訂單金額格式（強制）】確認訂單金額時，品項明細直接使用 calc_delivery 或 calc_pickup 工具回傳的 detail 欄位原文輸出，不可自行重新格式化或改寫。總金額使用工具回傳的 total，另起一行：「**總金額：X,XXX 元**」
-    ⚠️【bundle_tip 強制使用最後一次工具結果】若對話中曾多次呼叫 calc_delivery，bundle_tip（划算提醒）必須使用**最後一次**呼叫的回傳值。禁止沿用舊的 bundle_tip，若最後一次回傳 bundle_tip 為空，則不顯示任何划算提醒。
+    ⚠️【bundle_tip 強制顯示】calc_delivery 或 calc_pickup 回傳的 bundle_tip 若不為空，**必須原文顯示給客人**，不可省略、改寫或忽略。若對話中曾多次呼叫 calc_delivery，bundle_tip 必須使用**最後一次**呼叫的回傳值。若最後一次回傳 bundle_tip 為空，則不顯示任何划算提醒。
 21. 【禁止回答範圍（絕對執行）】以下一律回覆「不好意思，我只能回答老鄰居豆干絲的相關問題喔 😊」，不得有任何例外：
    - 競爭對手或其他店家的比較與評價
    - 政治、宗教、社會議題
@@ -2573,65 +2573,12 @@ def _insert_after_total_line(text: str, reminder: str) -> str:
             return '\n'.join(lines)
     return text + reminder
 
-def inject_reminder(text: str) -> str:
-    """Strip Claude's 小提醒, inject Python-calculated correct version."""
+def inject_reminder(text: str, bundle_tip: str = "") -> str:
+    """Strip Claude's 小提醒, inject bundle_tip from calc tool."""
     clean = _REMINDER_STRIP_RE.sub('', text).rstrip()
-
-    if '運費' not in text:
+    if not bundle_tip:
         return clean
-
-    # 取單位數：<<CALC>> → _parse_items_from_response → 共X單位 regex
-    m_calc = CALC_TAG.search(text)
-    if m_calc:
-        _, total_units = _parse_calc_tag(m_calc.group(1), exclude_jiaozi=True)
-    else:
-        parsed_items = _parse_items_from_response(text)
-        if parsed_items:
-            total_units = sum(qty for _, qty, _, _ in parsed_items)
-        else:
-            m_units = _TOTAL_UNITS_RE_MAIN.search(text) or _TOTAL_UNITS_RE_CALC.search(text)
-            if not m_units:
-                return clean
-            total_units = int(m_units.group(1))
-
-    if total_units == 0:
-        return clean
-    remainder   = total_units % 50
-
-    if remainder == 0 or (11 <= remainder <= 38):
-        return clean
-
-    if 39 <= remainder <= 49:
-        needed = 50 - remainder
-        target = ((total_units // 50) + 1) * 50
-        reminder = (
-            f"💡 小提醒：再加 {needed} 單位湊滿 {target} 單位（整箱），"
-            f"可省運費 290 元，請問是否調整呢？"
-        )
-        return _insert_after_total_line(clean, reminder)
-
-    # remainder 1–10：優先從 <<CALC>> 取品項，備用才用文字 regex
-    # 水餃屬門市自取，不計入宅配運費計算（自取訂單無運費，inject_reminder 早已 return）
-    shipping = 225
-    if m_calc:
-        items = _parse_calc_items(m_calc.group(1), exclude_jiaozi=True)
-    else:
-        items = [i for i in _parse_items_from_response(text) if i[0] != '水餃']
-    if not items:
-        return clean
-    main_name, main_qty, main_price, main_unit = max(items, key=lambda x: x[1])
-    if main_qty <= remainder:
-        return clean
-    items_cost     = sum(qty * price for _, qty, price, _ in items)
-    new_qty        = main_qty - remainder
-    adjusted_total = items_cost - remainder * main_price  # 減量後整箱免運
-    if adjusted_total <= 0:
-        return clean
-    reminder = (
-        f"💡 小提醒：若將{main_name}減少 {remainder} {main_unit}"
-        f"（調整為 {new_qty} {main_unit}），"
-        f"可省運費 {shipping} 元，總計 {adjusted_total:,} 元，請問是否調整訂單呢？"
-    )
+    reminder = f"💡 小提醒：{bundle_tip}"
     return _insert_after_total_line(clean, reminder)
 
 
@@ -3288,6 +3235,7 @@ def _call_claude(history: list, uid: str = "") -> tuple:
             tool_used = False
             tool_order_created = False  # True 代表本輪有呼叫建立/修改訂單的工具
             calc_called = False         # True 代表本輪有呼叫 calc_delivery 或 calc_pickup
+            last_bundle_tip = ""        # 最後一次 calc 工具回傳的 bundle_tip
             current_history = api_history[:]
             for _round in range(5):  # 最多 5 輪防無限迴圈
                 if r.stop_reason != "tool_use":
@@ -3313,9 +3261,11 @@ def _call_claude(history: list, uid: str = "") -> tuple:
                     elif block.name == "calc_delivery":
                         result = _exec_calc_delivery(block.input.get("items", []))
                         calc_called = True
+                        last_bundle_tip = result.get("bundle_tip", "")
                     elif block.name == "calc_pickup":
                         result = _exec_calc_pickup(block.input.get("items", []))
                         calc_called = True
+                        last_bundle_tip = result.get("bundle_tip", "")
                     elif block.name == "validate_pickup_time":
                         result = _exec_validate_pickup_time(block.input.get("pickup_datetime", ""))
                     elif block.name == "get_order_status":
@@ -3413,7 +3363,7 @@ def _call_claude(history: list, uid: str = "") -> tuple:
                         print(f"[EMPTY_REPLY] 重試成功")
                 except Exception as e2:
                     print(f"[EMPTY_REPLY_ERR] {e2}")
-            return final_text, tool_used, tool_order_created, calc_called
+            return final_text, tool_used, tool_order_created, calc_called, last_bundle_tip
         except anthropic.APIStatusError as e:
             # 額度不足 / 服務過載 → 不值得再試其他 model
             if "credit" in str(e).lower() or e.status_code == 529:
@@ -3614,7 +3564,7 @@ def ask(uid, msg):
     calc_called = False
     for attempt in range(3):
         try:
-            raw, tool_used, tool_order_created, calc_called = _call_claude(history, uid)
+            raw, tool_used, tool_order_created, calc_called, last_bundle_tip = _call_claude(history, uid)
             break
         except anthropic.APIStatusError as e:
             print(f"[API_ERR] attempt={attempt+1} status={e.status_code} body={str(e)[:200]}")
@@ -3649,7 +3599,9 @@ def ask(uid, msg):
             },
         ]
         try:
-            raw2, _, tool_order_created2, calc_called2 = _call_claude(retry_history, uid)
+            raw2, _, tool_order_created2, calc_called2, bundle_tip2 = _call_claude(retry_history, uid)
+            if bundle_tip2:
+                last_bundle_tip = bundle_tip2
             if calc_called2:
                 raw = raw2
                 tool_order_created = tool_order_created or tool_order_created2
@@ -3681,7 +3633,7 @@ def ask(uid, msg):
             set_pending_modify(uid, mod_type)
             print(f"[PENDING_MODIFY] 偵測到修改意圖，設定 pending_modify={mod_type}")
         # 湊包提醒
-        clean = inject_reminder(clean)
+        clean = inject_reminder(clean, last_bundle_tip)
         # 日期驗算
         clean = validate_ship_recv_date(clean)
         # 金額驗算
@@ -3719,6 +3671,8 @@ def ask(uid, msg):
     else:
         # tool use 成功：清掉殘留的舊 tag（防萬一）
         clean = CALC_TAG.sub('', clean).strip()
+        # 注入划算提醒（使用工具回傳的 bundle_tip，不依賴文字解析）
+        clean = inject_reminder(clean, last_bundle_tip)
         print(f"[TOOL_USED] 跳過舊機制備援")
 
     # 全域過濾（tool use 成功時跳過，避免誤刪工具回傳內容）
