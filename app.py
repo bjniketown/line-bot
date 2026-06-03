@@ -2371,6 +2371,20 @@ def _exec_validate_pickup_time(pickup_datetime: str) -> dict:
             ),
         }
 
+    # 30 天上限
+    diff_days = (dt.date() - now.date()).days
+    if diff_days > 30:
+        return {
+            "valid": False,
+            "reason": "too_far",
+            "message": (
+                f"非常感謝您的提前規劃！目前門市自取預約最多接受 30 天內的訂單，"
+                f"您預約的 {dt.strftime('%m/%d')} 超出範圍，暫時無法為您建單。\n\n"
+                f"建議您於 {(now + timedelta(days=25)).strftime('%m/%d')} 前後再來預約，"
+                f"我們會很樂意為您安排 😊 若有急需，也歡迎直接來電 04-25882881。"
+            ),
+        }
+
     # 15 分鐘準備時間
     diff_minutes = (dt - now).total_seconds() / 60
     if diff_minutes < 15:
