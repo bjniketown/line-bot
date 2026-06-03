@@ -844,6 +844,13 @@ def _exec_create_order(uid: str, confirmed_name: str, confirmed_phone: str, conf
     if not confirmed_name or not confirmed_name.strip():
         return {"success": False, "error": "缺少收件人姓名，請先向客人確認姓名後再建立訂單。"}
     # 驗證電話（confirmed_phone 已正規化，直接驗證格式即可）
+    # 若電話含遮罩符號（*），自動用 LINE UID 查真實電話
+    if '*' in confirmed_phone:
+        p = get_customer_profile(uid) if uid else {}
+        if p and p.get("phone"):
+            confirmed_phone = p["phone"]
+        else:
+            return {"success": False, "error": "無法解析遮罩電話，請呼叫 confirm_customer_data 取得真實電話後再建立訂單。"}
     norm_phone = normalize_phone(confirmed_phone)
     if not _is_tw_phone(norm_phone):
         return {"success": False, "error": f"電話格式錯誤：{confirmed_phone}，請確認後重新輸入。"}
@@ -900,6 +907,12 @@ def _exec_create_pickup(uid: str, confirmed_name: str, confirmed_phone: str,
     total 與 sauce_note 必須來自 calc_pickup 工具的回傳值。"""
     if not confirmed_name or not confirmed_name.strip():
         return {"success": False, "error": "缺少客人姓名，請先向客人確認姓名後再建立訂單。"}
+    if '*' in confirmed_phone:
+        p = get_customer_profile(uid) if uid else {}
+        if p and p.get("phone"):
+            confirmed_phone = p["phone"]
+        else:
+            return {"success": False, "error": "無法解析遮罩電話，請呼叫 confirm_customer_data 取得真實電話後再建立訂單。"}
     norm_phone = normalize_phone(confirmed_phone)
     if not _is_tw_phone(norm_phone):
         return {"success": False, "error": f"電話格式錯誤：{confirmed_phone}，請確認後重新輸入。"}
