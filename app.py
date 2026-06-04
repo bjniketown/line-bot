@@ -4421,7 +4421,7 @@ def customers_admin():
             r_supa = requests.get(
                 f"{SUPABASE_URL}/rest/v1/orders",
                 headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
-                params={"select": "phone,order_type,items,ship_date,pickup_time,created_at", "limit": "2000"},
+                params={"select": "phone,order_type,items,ship_date,pickup_time,created_at,total", "limit": "2000"},
                 timeout=8,
             )
             if r_supa.ok:
@@ -4430,8 +4430,9 @@ def customers_admin():
                     if not ph:
                         continue
                     if ph not in order_map:
-                        order_map[ph] = {"count": 0, "last_type": "", "last_date": "", "orders": []}
+                        order_map[ph] = {"count": 0, "total_spent": 0, "last_type": "", "last_date": "", "orders": []}
                     order_map[ph]["count"] += 1
+                    order_map[ph]["total_spent"] += int(r_o.get("total") or 0)
                     o_date = (r_o.get("ship_date") or (r_o.get("pickup_time") or "")[:10] or (r_o.get("created_at") or "")[:10])
                     if o_date > order_map[ph]["last_date"]:
                         order_map[ph]["last_date"] = o_date
@@ -4445,9 +4446,10 @@ def customers_admin():
         pass
 
     def _customer_tags(phone):
-        """回傳 [(label, color), ...] 行動導向標籤：忠實客／沉睡客／單次客／過客"""
+        """回傳 [(label, color), ...] 主標籤+副標籤"""
         om = order_map.get(normalize_phone(phone), {})
         count = om.get("count", 0)
+        total_spent = om.get("total_spent", 0)
         last_date_str = om.get("last_date", "")
         if count == 0:
             return []
@@ -4459,20 +4461,22 @@ def customers_admin():
                 days_ago = (datetime.now(_TZ_TW).replace(tzinfo=None) - last_dt).days
             except Exception:
                 pass
-        # 忠實客：訂單 ≥ 3 筆（優先顯示）
-        if count >= 3:
-            return [("🔁 忠實客", "#7b1fa2")]
-        # 單次客觀察期：只有 1 筆，30 天內
-        if count == 1 and days_ago <= 30:
-            return [("🆕 單次客", "#1976d2")]
-        # 過客：只有 1 筆，超過 60 天沒回購
-        if count == 1 and days_ago > 60:
-            return [("👀 過客", "#90a4ae")]
-        # 沉睡客：有訂單但 90 天沒回購
-        if days_ago > 90:
-            return [("💤 沉睡客", "#546e7a")]
-        # 一般回頭客（2 筆，60 天內）
-        return [("🛍 回頭客", "#e65100")]
+        # 主標籤（擇一）
+        if count >= 10 or total_spent >= 12000:
+            main = ("👑 VIP客", "#b8860b")
+        elif count >= 3:
+            main = ("🔁 忠實客", "#7b1fa2")
+        elif count == 2:
+            main = ("🛍 回頭客", "#e65100")
+        elif count == 1 and days_ago <= 30:
+            main = ("🆕 新客", "#1976d2")
+        else:
+            main = ("👀 過客", "#90a4ae")
+        tags = [main]
+        # 副標籤：流失風險（超過30天沒回購，排除新客）
+        if days_ago > 30 and main[0] not in ("🆕 新客", "👀 過客"):
+            tags.append(("💤 流失風險", "#546e7a"))
+        return tags
 
     # 建立 modal 用的客戶 JSON 資料
     import html as _html
@@ -4541,9 +4545,9 @@ def customers_admin():
 
     modal_json = json.dumps(modal_data, ensure_ascii=False)
     # 標籤篩選列 HTML（依出現順序排列）
-    TAG_ORDER = ["🔁 忠實客","🛍 回頭客","🆕 單次客","💤 沉睡客","👀 過客"]
+    TAG_ORDER = ["👑 VIP客","🔁 忠實客","🛍 回頭客","🆕 新客","👀 過客","💤 流失風險"]
     sorted_tags = [t for t in TAG_ORDER if t in all_tag_labels]
-    TAG_COLORS = {"🔁 忠實客":"#7b1fa2","🛍 回頭客":"#e65100","🆕 單次客":"#1976d2","💤 沉睡客":"#546e7a","👀 過客":"#90a4ae"}
+    TAG_COLORS = {"👑 VIP客":"#b8860b","🔁 忠實客":"#7b1fa2","🛍 回頭客":"#e65100","🆕 新客":"#1976d2","👀 過客":"#90a4ae","💤 流失風險":"#546e7a"}
     filter_bar_html = "".join(
         "<button class='ftag' data-tag='" + t + "' style='--ac:" + TAG_COLORS.get(t, "#888") + "'>" + t + "</button>"
         for t in sorted_tags
