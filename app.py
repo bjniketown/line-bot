@@ -4391,7 +4391,71 @@ def customers_admin():
         return Response("﻿" + buf.getvalue(), mimetype="text/csv; charset=utf-8",
                         headers={"Content-Disposition": "attachment; filename=customers.csv"})
 
-    customers = _fetch_from_supabase(q)
+    tag_filter = request.args.get("tag", "").strip()
+
+    # 先建 order_map（全部訂單，不受客戶 500 筆限制）
+    order_map = {}
+    try:
+        if SUPABASE_URL:
+            r_om = requests.get(
+                f"{SUPABASE_URL}/rest/v1/orders",
+                headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+                params={"select": "phone,order_type,ship_date,pickup_time,created_at,total", "limit": "5000"},
+                timeout=10,
+            )
+            if r_om.ok:
+                for r_o in r_om.json():
+                    ph = normalize_phone(r_o.get("phone", ""))
+                    if not ph:
+                        continue
+                    if ph not in order_map:
+                        order_map[ph] = {"count": 0, "total_spent": 0, "last_type": "", "last_date": "", "orders": []}
+                    order_map[ph]["count"] += 1
+                    order_map[ph]["total_spent"] += int(r_o.get("total") or 0)
+                    o_date = (r_o.get("ship_date") or (r_o.get("pickup_time") or "")[:10] or (r_o.get("created_at") or "")[:10])
+                    if o_date > order_map[ph]["last_date"]:
+                        order_map[ph]["last_date"] = o_date
+                        order_map[ph]["last_type"] = r_o.get("order_type", "")
+                    order_map[ph]["orders"].append({"date": o_date, "type": r_o.get("order_type", ""), "items": r_o.get("items", "")})
+    except Exception:
+        pass
+
+    # 若有標籤篩選，從 order_map 找出符合電話，再撈那些客人
+    if tag_filter and not q:
+        def _da(s):
+            try: return (datetime.now(_TZ_TW).replace(tzinfo=None) - datetime.strptime(s[:10], "%Y-%m-%d")).days
+            except: return 9999
+        matched_phones = []
+        for ph, om in order_map.items():
+            c, ts, d = om["count"], om["total_spent"], _da(om["last_date"])
+            if tag_filter == "👑 VIP客" and (c >= 10 or ts >= 12000):
+                matched_phones.append(ph)
+            elif tag_filter == "🔁 忠實客" and 3 <= c <= 9 and not (c >= 10 or ts >= 12000):
+                matched_phones.append(ph)
+            elif tag_filter == "🛍 回頭客" and c == 2:
+                matched_phones.append(ph)
+            elif tag_filter == "🆕 新客" and c == 1 and d <= 30:
+                matched_phones.append(ph)
+            elif tag_filter == "👀 過客" and c == 1 and d > 30:
+                matched_phones.append(ph)
+            elif tag_filter == "💤 流失風險" and d > 30 and c >= 2 and not (c >= 10 or ts >= 12000):
+                matched_phones.append(ph)
+        customers = []
+        if matched_phones and SUPABASE_URL:
+            try:
+                phones_str = ",".join(f'"{p}"' for p in matched_phones[:500])
+                rc = requests.get(
+                    f"{SUPABASE_URL}/rest/v1/customers",
+                    headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+                    params={"phone": f"in.({phones_str})", "order": "updated_at.desc", "limit": "500"},
+                    timeout=8,
+                )
+                customers = rc.json() if rc.ok else []
+            except Exception:
+                pass
+    else:
+        customers = _fetch_from_supabase(q)
+
     total = len(customers)
 
     # 批次查地址（一次撈全部，避免 N+1）
@@ -4413,37 +4477,6 @@ def customers_admin():
                     addr_map[ph].append(a.get("address", ""))
         except Exception:
             pass
-
-    # 從 Supabase 撈所有訂單（含已出貨），建立電話 → {count, last_type, last_date, orders[]} 對應表
-    order_map = {}
-    try:
-        if SUPABASE_URL:
-            r_supa = requests.get(
-                f"{SUPABASE_URL}/rest/v1/orders",
-                headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
-                params={"select": "phone,order_type,items,ship_date,pickup_time,created_at,total", "limit": "2000"},
-                timeout=8,
-            )
-            if r_supa.ok:
-                for r_o in r_supa.json():
-                    ph = normalize_phone(r_o.get("phone", ""))
-                    if not ph:
-                        continue
-                    if ph not in order_map:
-                        order_map[ph] = {"count": 0, "total_spent": 0, "last_type": "", "last_date": "", "orders": []}
-                    order_map[ph]["count"] += 1
-                    order_map[ph]["total_spent"] += int(r_o.get("total") or 0)
-                    o_date = (r_o.get("ship_date") or (r_o.get("pickup_time") or "")[:10] or (r_o.get("created_at") or "")[:10])
-                    if o_date > order_map[ph]["last_date"]:
-                        order_map[ph]["last_date"] = o_date
-                        order_map[ph]["last_type"] = r_o.get("order_type", "")
-                    order_map[ph]["orders"].append({
-                        "date": o_date,
-                        "type": r_o.get("order_type", ""),
-                        "items": r_o.get("items", ""),
-                    })
-    except Exception:
-        pass
 
     def _customer_tags(phone):
         """回傳 [(label, color), ...] 主標籤+副標籤"""
@@ -4549,7 +4582,7 @@ def customers_admin():
     sorted_tags = [t for t in TAG_ORDER if t in all_tag_labels]
     TAG_COLORS = {"👑 VIP客":"#b8860b","🔁 忠實客":"#7b1fa2","🛍 回頭客":"#e65100","🆕 新客":"#1976d2","👀 過客":"#90a4ae","💤 流失風險":"#546e7a"}
     filter_bar_html = "".join(
-        "<button class='ftag' data-tag='" + t + "' style='--ac:" + TAG_COLORS.get(t, "#888") + "'>" + t + "</button>"
+        "<button class='ftag" + (" active" if t == tag_filter else "") + "' data-tag='" + t + "' style='--ac:" + TAG_COLORS.get(t, "#888") + (";background:" + TAG_COLORS.get(t, "#888") + ";color:#fff" if t == tag_filter else "") + "'>" + t + "</button>"
         for t in sorted_tags
     )
 
@@ -4698,22 +4731,17 @@ document.querySelectorAll('.ftag').forEach(btn => {{
   btn.style.setProperty('--ac', btn.style.getPropertyValue('--ac') || '#888');
   btn.addEventListener('click', () => {{
     const t = btn.dataset.tag;
-    if (activeTag === t) {{
-      activeTag = '';
-      document.querySelectorAll('.ftag').forEach(b => b.classList.remove('active'));
+    const currentTag = new URLSearchParams(window.location.search).get('tag') || '';
+    if (currentTag === t) {{
+      const url = new URL(window.location.href);
+      url.searchParams.delete('tag');
+      window.location.href = url.toString();
     }} else {{
-      activeTag = t;
-      document.querySelectorAll('.ftag').forEach(b => {{
-        b.classList.toggle('active', b.dataset.tag === t);
-        if (b.classList.contains('active')) b.style.background = b.style.getPropertyValue('--ac') || getComputedStyle(b).getPropertyValue('--ac');
-        else b.style.background = '';
-      }});
+      const url = new URL(window.location.href);
+      url.searchParams.set('tag', t);
+      url.searchParams.delete('q');
+      window.location.href = url.toString();
     }}
-    document.querySelectorAll('.card').forEach(card => {{
-      const tags = card.dataset.tags || '';
-      card.style.display = (!activeTag || tags.includes(activeTag)) ? '' : 'none';
-    }});
-    document.getElementById('visible-cnt').textContent = [...document.querySelectorAll('.card')].filter(c=>c.style.display!=='none').length;
   }});
 }});
 </script>"""
