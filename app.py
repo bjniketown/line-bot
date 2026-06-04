@@ -457,9 +457,11 @@ def dumpling_soldout_text() -> str:
     sold = _dumpling_soldout or bool(_redis(["GET", "dumpling_soldout"]))
     if sold:
         return (
-            "【今日水餃售完】今日水餃已售完。"
-            "客人詢問或訂購水餃時，告知今日水餃已售完，其他品項完全不受影響，"
-            "明日歡迎再訂購。"
+            "【本週水餃售完】本週水餃已售完。"
+            "水餃每週一現包，需冷凍一天硬化後才能打包販售，所以週二起才開始供應，這是為了確保客人吃到最新鮮的水餃。"
+            "客人詢問或訂購水餃時，告知本週水餃已售完，下週二起恢復供應，歡迎屆時再來。"
+            "若客人詢問為何要等這麼久，說明製程：每週一現包、冷凍一天、週二起販售。"
+            "其他品項（豆干絲、花生、昆布、油潑辣子）完全正常供應，不受影響。"
         )
     return ""
 
@@ -477,10 +479,20 @@ def chili_soldout_text() -> str:
     """回傳辣油售完狀態，供每次呼叫 Claude 時動態注入。"""
     sold = _chili_soldout or bool(_redis(["GET", "chili_soldout"]))
     if sold:
+        # 推算下次補貨日：週二炸→週三販售，週六炸→週日販售
+        now = datetime.now(_TZ_TW)
+        wd = now.weekday()  # 0=週一 ... 6=週日
+        if wd in (0, 1, 4, 5, 6):  # 週日、週一、週五、週六 → 下週三（週二炸隔日）
+            days_to_wed = (2 - wd) % 7 or 7
+            resume = (now + timedelta(days=days_to_wed)).strftime("%m/%d")
+        else:  # 週二、週三、週四 → 本週日（週六炸隔日）
+            days_to_sun = (6 - wd) + 1
+            resume = (now + timedelta(days=days_to_sun)).strftime("%m/%d")
         return (
-            "【油潑辣子售完】目前油潑辣子已售完。"
-            "客人詢問或訂購辣油時，告知目前售完，其他品項完全不受影響，"
-            "需手動恢復後才可再訂購。"
+            f"【油潑辣子售完】目前油潑辣子已售完，預計 {resume} 恢復供應。"
+            f"油潑辣子每週二、週六現炸，需冷卻後隔日才能裝瓶販售，這是為了確保品質與安全。"
+            f"客人詢問或訂購辣油時，告知目前售完，預計 {resume} 恢復，其他品項完全不受影響。"
+            f"若客人詢問為何要等，說明：現炸溫度很高，需完全冷卻後才能裝瓶封蓋，確保品質 😊"
         )
     return ""
 
@@ -4169,7 +4181,7 @@ def store_admin():
         f"<span class='badge {d_cls}'>{d_txt}</span>"
         "</div>"
         "<div class='card-bd'><div class='btn-row'>"
-        f"<a class='btn btn-r' href='/store?token={token}&action=dumpling_close'>今日售完</a>"
+        f"<a class='btn btn-r' href='/store?token={token}&action=dumpling_close'>本週售完</a>"
         f"<a class='btn btn-g' href='/store?token={token}&action=dumpling_open'>恢復供應</a>"
         "</div></div></div>"
 
