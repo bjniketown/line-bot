@@ -1125,14 +1125,41 @@ def save_customer_profile(uid: str, profile: dict):
         ex_phone = existing.get("phone", "")
         p = ex_phone or phone
         _supa_upsert("customers", {"phone": p, **update})
-        # 地址有變動才新增（自取不傳 addr，不影響現有地址）
+        # 地址有變動才更新（自取不傳 addr，不影響現有地址）
         if addr and addr != existing.get("address", ""):
-            existing_addrs = [a.get("address", "") for a in _supa_get_addresses(p)]
-            if addr not in existing_addrs:
+            existing_addrs = _supa_get_addresses(p)
+            addr_list = [a.get("address", "") for a in existing_addrs]
+            # 把所有舊地址的 is_default 設為 false
+            if existing_addrs and SUPABASE_URL:
+                try:
+                    requests.patch(
+                        f"{SUPABASE_URL}/rest/v1/addresses?phone=eq.{p}",
+                        headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
+                                 "Content-Type": "application/json"},
+                        json={"is_default": False},
+                        timeout=5,
+                    )
+                except Exception:
+                    pass
+            if addr not in addr_list:
+                # 新地址：寫入並設為預設
                 _supa_upsert("addresses", {
                     "phone": p, "address": addr,
-                    "label": "預設", "is_default": not bool(existing_addrs),
+                    "label": "預設", "is_default": True,
                 })
+            else:
+                # 已存在的地址：更新為預設
+                if SUPABASE_URL:
+                    try:
+                        requests.patch(
+                            f"{SUPABASE_URL}/rest/v1/addresses?phone=eq.{p}&address=eq.{addr}",
+                            headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
+                                     "Content-Type": "application/json"},
+                            json={"is_default": True},
+                            timeout=5,
+                        )
+                    except Exception:
+                        pass
     else:
         # 全新客人（含假電話升級為真實電話）：完整寫入
         if phone:
