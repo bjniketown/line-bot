@@ -1,8 +1,15 @@
-import os, hashlib, hmac, base64, time, re, json, threading
+import os, hashlib, hmac, base64, time, re, json, threading, logging
 from collections import OrderedDict
 from datetime import datetime, timezone, timedelta
 from flask import Flask, request, abort
 import anthropic, requests
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+log = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
@@ -195,7 +202,7 @@ def _save_chat_log(uid: str, role: str, message: str):
             timeout=5,
         )
     except Exception as e:
-        print(f"[CHAT_LOG_ERR] {e}")
+        log.info(f"[CHAT_LOG_ERR] {e}")
 
 def _count_user_chat_logs(uid: str) -> int:
     if not SUPABASE_URL:
@@ -249,9 +256,9 @@ def _analyze_personality(uid: str):
                   "analyzed_at": datetime.now(_TZ_TW).isoformat()},
             timeout=10,
         )
-        print(f"[PERSONALITY] uid={uid[:8]} sample={sample_count} traits={traits[:40]}")
+        log.info(f"[PERSONALITY] uid={uid[:12]} sample={sample_count} traits={traits[:40]}")
     except Exception as e:
-        print(f"[PERSONALITY_ERR] {e}")
+        log.info(f"[PERSONALITY_ERR] {e}")
 
 def _maybe_analyze_personality(uid: str):
     """每累積 50 則 user 訊息觸發一次人格分析（背景執行）"""
@@ -314,9 +321,9 @@ def _fetch_and_save_line_profile(uid: str):
                       "picture_url": picture_url, "phone": f"line_{uid[:12]}"},
                 timeout=5,
             )
-        print(f"[LINE_PROFILE] uid={uid[:8]} name={display_name}")
+        log.info(f"[LINE_PROFILE] uid={uid[:12]} name={display_name}")
     except Exception as e:
-        print(f"[LINE_PROFILE_ERR] {e}")
+        log.info(f"[LINE_PROFILE_ERR] {e}")
 
 
 def _fetch_qr_code_url():
@@ -788,14 +795,14 @@ def _save_order_record(order_type: str, order_info: str, reply_text: str, uid: s
         old_key = _redis(["GET", f"active_order:{phone}"])
         if old_key:
             _redis(["DEL", old_key])
-            print(f"[MODIFY] 刪除舊訂單 {old_key}")
+            log.info(f"[MODIFY] 刪除舊訂單 {old_key}")
     # 防重複：同電話+出貨日/取貨時間，10分鐘內只寫一筆（修改模式跳過）
     # 不含 items，避免同人同日不同品項被誤擋；不同出貨日視為獨立訂單
     if not modify:
         dedup_str = f"{phone}|{record.get('ship_date','') or record.get('pickup_time','')}"
         dedup_key = "order_dedup:" + hashlib.md5(dedup_str.encode()).hexdigest()
         if _redis(["SET", dedup_key, "1", "NX", "EX", 600]) is None:
-            print(f"[ORDER_DEDUP] 重複訂單略過 {dedup_str[:60]}")
+            log.info(f"[ORDER_DEDUP] 重複訂單略過 {dedup_str[:60]}")
             return
     key = f"order:{ts}:{order_type}"
     _redis(["SET", key, json.dumps(record, ensure_ascii=False), "EX", 15552000])
@@ -825,9 +832,9 @@ def _save_order_record(order_type: str, order_info: str, reply_text: str, uid: s
                     params={"phone": f"eq.{phone}"},
                     timeout=5,
                 )
-                print(f"[SUPA_ORDER_DEL] 已刪除 {phone} 所有舊訂單")
+                log.info(f"[SUPA_ORDER_DEL] 已刪除 {phone} 所有舊訂單")
             except Exception as e:
-                print(f"[SUPA_ORDER_DEL] {e}")
+                log.info(f"[SUPA_ORDER_DEL] {e}")
         try:
             requests.post(
                 f"{SUPABASE_URL}/rest/v1/orders",
@@ -835,9 +842,9 @@ def _save_order_record(order_type: str, order_info: str, reply_text: str, uid: s
                          "Content-Type": "application/json", "Prefer": "return=minimal"},
                 json=supa_record, timeout=5,
             )
-            print(f"[SUPA_ORDER] 已寫入 {phone} {record.get('type')} {record.get('ship_date') or record.get('pickup_time','')}")
+            log.info(f"[SUPA_ORDER] 已寫入 {phone} {record.get('type')} {record.get('ship_date') or record.get('pickup_time','')}")
         except Exception as e:
-            print(f"[SUPA_ORDER_ERR] {e}")
+            log.info(f"[SUPA_ORDER_ERR] {e}")
 
 _BANK_INFO = (
     "💳 **匯款資訊**\n"
@@ -1179,9 +1186,9 @@ def save_customer_profile(uid: str, profile: dict):
                 timeout=5,
             )
             if r_del.status_code == 204:
-                print(f"[MERGE] 已清除 {uid[:8]} 的假電話記錄")
+                log.info(f"[MERGE] 已清除 {uid[:12]} 的假電話記錄")
         except Exception as e:
-            print(f"[MERGE_ERR] {e}")
+            log.info(f"[MERGE_ERR] {e}")
 
 def customer_profile_text(uid: str, current_msg: str = "") -> str:
     """回傳回訪客人打招呼提示（僅供識別稱呼用）。
@@ -2810,9 +2817,9 @@ def reply(token, messages):
             timeout=10,
         )
         if not r.ok:
-            print(f"[WARN] reply failed {r.status_code}: {r.text[:200]}")
+            log.info(f"[WARN] reply failed {r.status_code}: {r.text[:200]}")
     except Exception as e:
-        print(f"[WARN] reply exception: {e}")
+        log.info(f"[WARN] reply exception: {e}")
 
 
 def push_message(uid, messages):
@@ -2827,9 +2834,9 @@ def push_message(uid, messages):
             timeout=15,
         )
         if not r.ok:
-            print(f"[WARN] push_message failed {r.status_code}: {r.text[:200]}")
+            log.info(f"[WARN] push_message failed {r.status_code}: {r.text[:200]}")
     except Exception as e:
-        print(f"[WARN] push_message exception: {e}")
+        log.info(f"[WARN] push_message exception: {e}")
 
 
 _FAST_TIMEOUT = 55  # 秒：reply token 有效期 60 秒，盡量等 Claude 跑完再用 reply，避免消耗 push 額度
@@ -2886,7 +2893,7 @@ def _handle_claude(token, uid, text):
         try:
             result_holder[0] = ask_with_cache(uid, text)
         except Exception as e:
-            print(f"[WORKER_ERR] {type(e).__name__}: {str(e)[:200]}")
+            log.info(f"[WORKER_ERR] {type(e).__name__}: {str(e)[:200]}")
             result_holder[0] = "哎呀，剛才網路有點小狀況 😅 沒能接收到您的訊息，麻煩再傳一次訊息給我，馬上為您服務！"
         finally:
             done.set()
@@ -2901,19 +2908,25 @@ def _handle_claude(token, uid, text):
 
     if done.wait(timeout=_FAST_TIMEOUT):
         if _seq_changed():
-            print(f"[DEBOUNCE_DROP] uid={uid} 有新訊息，丟棄舊回覆")
+            log.info(f"[DEBOUNCE_DROP] uid={uid} 有新訊息，丟棄舊回覆")
             return
-        reply(token, result_holder[0])
-        _maybe_push_address_reminder(uid, text, result_holder[0])
+        reply_text = result_holder[0]
+        if isinstance(reply_text, str):
+            log.info(f"[REPLY] uid={uid[:12]} reply={reply_text[:80]}")
+        reply(token, reply_text)
+        _maybe_push_address_reminder(uid, text, reply_text)
     else:
         reply(token, "⏳ 稍等一下，我幫您確認中...")
         def push_when_done():
             done.wait()
             if _seq_changed():
-                print(f"[DEBOUNCE_DROP] uid={uid} 有新訊息，丟棄 push 回覆")
+                log.info(f"[DEBOUNCE_DROP] uid={uid} 有新訊息，丟棄 push 回覆")
                 return
-            push_message(uid, result_holder[0])
-            _maybe_push_address_reminder(uid, text, result_holder[0])
+            push_reply = result_holder[0]
+            if isinstance(push_reply, str):
+                log.info(f"[REPLY] uid={uid[:12]} push={push_reply[:80]}")
+            push_message(uid, push_reply)
+            _maybe_push_address_reminder(uid, text, push_reply)
         threading.Thread(target=push_when_done, daemon=True).start()
 
 
@@ -3357,7 +3370,7 @@ def _call_claude(history: list, uid: str = "") -> tuple:
                         )
                     else:
                         result = {"error": "unknown tool"}
-                    print(f"[TOOL] uid={uid} round={_round+1} {block.name} → {str(result)[:200]}")
+                    log.info(f"[TOOL] uid={uid} round={_round+1} {block.name} → {str(result)[:200]}")
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": block.id,
@@ -3387,7 +3400,7 @@ def _call_claude(history: list, uid: str = "") -> tuple:
             final_text = text_blocks[0].text if text_blocks else ""
             # 工具呼叫後回傳空字串 → 補一輪重試，要求 Claude 產生文字回覆
             if not final_text.strip() and tool_used:
-                print(f"[EMPTY_REPLY] 工具呼叫後回傳空字串，補重試")
+                log.info(f"[EMPTY_REPLY] 工具呼叫後回傳空字串，補重試")
                 retry_history = current_history + [
                     {"role": "assistant", "content": r.content},
                     {"role": "user", "content": [{"type": "tool_result", "tool_use_id": r.content[-1].id if r.content else "x", "content": "請根據以上工具結果，用繁體中文回覆客人，不可回傳空白。"}]}
@@ -3402,9 +3415,9 @@ def _call_claude(history: list, uid: str = "") -> tuple:
                     text_blocks2 = [b for b in r2.content if hasattr(b, "text")]
                     if text_blocks2:
                         final_text = text_blocks2[0].text
-                        print(f"[EMPTY_REPLY] 重試成功")
+                        log.info(f"[EMPTY_REPLY] 重試成功")
                 except Exception as e2:
-                    print(f"[EMPTY_REPLY_ERR] {e2}")
+                    log.info(f"[EMPTY_REPLY_ERR] {e2}")
             return final_text, tool_used, tool_order_created, calc_called, last_bundle_tip
         except anthropic.APIStatusError as e:
             # 額度不足 / 服務過載 → 不值得再試其他 model
@@ -3609,7 +3622,7 @@ def ask(uid, msg):
             raw, tool_used, tool_order_created, calc_called, last_bundle_tip = _call_claude(history, uid)
             break
         except anthropic.APIStatusError as e:
-            print(f"[API_ERR] attempt={attempt+1} status={e.status_code} body={str(e)[:200]}")
+            log.info(f"[API_ERR] uid={uid[:12]} attempt={attempt+1} status={e.status_code} body={str(e)[:200]}")
             if "credit" in str(e).lower():
                 return "很抱歉，服務暫時維護中，請直撥 04-25882881，我們將盡快為您服務 😊", False
             if e.status_code == 529:
@@ -3619,19 +3632,19 @@ def ask(uid, msg):
                 return "哎呀，剛才網路有點小狀況 😅 沒能接收到您的訊息，麻煩再傳一次訊息給我，馬上為您服務！", False
             return "哎呀，剛才網路有點小狀況 😅 沒能接收到您的訊息，麻煩再傳一次訊息給我，馬上為您服務！", False
         except Exception as e:
-            print(f"[API_ERR] unexpected: {type(e).__name__}: {str(e)[:200]}")
+            log.info(f"[API_ERR] uid={uid[:12]} unexpected: {type(e).__name__}: {str(e)[:200]}")
             return "哎呀，剛才網路有點小狀況 😅 沒能接收到您的訊息，麻煩再傳一次訊息給我，馬上為您服務！", False
     if raw is None:
         return "哎呀，剛才網路有點小狀況 😅 沒能接收到您的訊息，麻煩再傳一次訊息給我，馬上為您服務！", False
 
-    print(f"[RAW] uid={uid} {raw[:300]}")
+    log.info(f"[RAW] uid={uid} {raw[:300]}")
 
     # ── 金額攔截：Claude 報了結論性金額但沒呼叫 calc 工具 → 強制重問 ──────
     # 只攔截結論性金額字眼（總金額、免運費等），不攔截單價介紹（70元/包）
     _PRICE_KW = ("免運費", "**總金額", "總金額：", "總計：", "加收運費", "運費：\n", "運費 \n")
     _has_price_claim = any(kw in raw for kw in _PRICE_KW)
     if _has_price_claim and not calc_called and not tool_order_created:
-        print(f"[PRICE_INTERCEPT] 偵測到結論性金額但未呼叫 calc 工具，強制重問")
+        log.info(f"[PRICE_INTERCEPT] 偵測到結論性金額但未呼叫 calc 工具，強制重問")
         # 不汙染現有歷史，另起新的 history 重問
         retry_history = history + [
             {"role": "assistant", "content": raw},
@@ -3648,11 +3661,11 @@ def ask(uid, msg):
                 raw = raw2
                 tool_order_created = tool_order_created or tool_order_created2
                 calc_called = True
-                print(f"[PRICE_INTERCEPT] 重問成功，calc 工具已呼叫")
+                log.info(f"[PRICE_INTERCEPT] 重問成功，calc 工具已呼叫")
             else:
-                print(f"[PRICE_INTERCEPT] 重問後仍未呼叫 calc，放行原始回覆")
+                log.info(f"[PRICE_INTERCEPT] 重問後仍未呼叫 calc，放行原始回覆")
         except Exception as e:
-            print(f"[PRICE_INTERCEPT_ERR] {e}")
+            log.info(f"[PRICE_INTERCEPT_ERR] {e}")
 
     clean, order_type, order_info, is_modify = extract_order(raw)
 
@@ -3667,13 +3680,13 @@ def ask(uid, msg):
         # 修改意圖偵測
         pending_mod = get_pending_modify(uid)
         if order_info and not is_modify and pending_mod:
-            print(f"[PENDING_MODIFY] 強制轉換 {order_type} → MODIFY_{order_type.upper()}")
+            log.info(f"[PENDING_MODIFY] 強制轉換 {order_type} → MODIFY_{order_type.upper()}")
             is_modify = True
             clear_pending_modify(uid)
         if get_has_order(uid) and _MODIFY_INTENT_RE.search(msg):
             mod_type = "pickup"
             set_pending_modify(uid, mod_type)
-            print(f"[PENDING_MODIFY] 偵測到修改意圖，設定 pending_modify={mod_type}")
+            log.info(f"[PENDING_MODIFY] 偵測到修改意圖，設定 pending_modify={mod_type}")
         # 湊包提醒
         clean = inject_reminder(clean, last_bundle_tip)
         # 日期驗算
@@ -3715,7 +3728,7 @@ def ask(uid, msg):
         clean = CALC_TAG.sub('', clean).strip()
         # 注入划算提醒（使用工具回傳的 bundle_tip，不依賴文字解析）
         clean = inject_reminder(clean, last_bundle_tip)
-        print(f"[TOOL_USED] 跳過舊機制備援")
+        log.info(f"[TOOL_USED] 跳過舊機制備援")
 
     # 全域過濾（tool use 成功時跳過，避免誤刪工具回傳內容）
     if not tool_used:
@@ -3725,7 +3738,7 @@ def ask(uid, msg):
 
     if not clean or not clean.strip():
         clean = "哎呀，剛才網路有點小狀況 😅 沒能接收到您的訊息，麻煩再傳一次訊息給我，馬上為您服務！"
-        print(f"[WARN] empty reply intercepted, replaced with fallback")
+        log.info(f"[WARN] empty reply intercepted, replaced with fallback")
 
     history.append(_msg_with_time("assistant", clean))
     set_history(uid, history)
@@ -3849,7 +3862,7 @@ def _handle_image(uid: str, token: str, message_id: str):
         reply(token, answer)
 
     except Exception as e:
-        print(f"[ERROR] _handle_image uid={uid} err={e}")
+        log.info(f"[ERROR] _handle_image uid={uid} err={e}")
         reply(token, "圖片處理發生錯誤，請稍後再試，或直接說明您的需求 😊")
 
 
@@ -3873,7 +3886,7 @@ def webhook():
             text  = e["message"]["text"]
             token = e["replyToken"]
             uid   = e["source"]["userId"]
-            print(f"[MSG] {datetime.now(_TZ_TW).strftime('%Y-%m-%d %H:%M:%S')} uid={uid} msg={text[:50]}")
+            log.info(f"[MSG] {datetime.now(_TZ_TW).strftime('%Y-%m-%d %H:%M:%S')} uid={uid} msg={text[:50]}")
             # ── 自動記錄客戶名單 ─────────────────────────────────────────────
             register_customer(uid)
 
@@ -3941,7 +3954,7 @@ def _debounce_worker(uid: str, seq: int):
     _redis(["DEL", f"debounce_seq:{uid}"])
     last_token = pending[-1]["token"]
     combined_text = "\n".join(p["text"] for p in pending)
-    print(f"[DEBOUNCE] uid={uid} merged={len(pending)}則 text={combined_text[:80]}")
+    log.info(f"[DEBOUNCE] uid={uid} merged={len(pending)}則 text={combined_text[:80]}")
     # 合併後先檢查 keyword rules，命中則直接回覆，不呼叫 Claude
     rule = quick_rule_reply(combined_text, uid)
     if rule:
@@ -4913,7 +4926,7 @@ def orders_admin():
                         timeout=5,
                     )
                 except Exception as e:
-                    print(f"[SHIP_ERR] {e}")
+                    log.info(f"[SHIP_ERR] {e}")
                 try:
                     # 查客人 LINE UID，push 出貨通知
                     cust = get_phone_profile(norm_ph)
@@ -4926,9 +4939,9 @@ def orders_admin():
                             "客服專線：412-8888（手機直撥請加02）"
                         )
                         push_message(uid_to_push, ship_msg)
-                        print(f"[SHIP_NOTIFY] 已推播出貨通知 uid={uid_to_push[:12]}")
+                        log.info(f"[SHIP_NOTIFY] 已推播出貨通知 uid={uid_to_push[:12]}")
                 except Exception as e:
-                    print(f"[SHIP_NOTIFY_ERR] {e}")
+                    log.info(f"[SHIP_NOTIFY_ERR] {e}")
             _redis(["DEL", ship_key])
         from flask import redirect
         return redirect(f"/orders?token={token}&tab={tab}")
@@ -4949,16 +4962,16 @@ def orders_admin():
                         timeout=5,
                     )
                 except Exception as e:
-                    print(f"[READY_ERR] {e}")
+                    log.info(f"[READY_ERR] {e}")
                 try:
                     cust = get_phone_profile(norm_ph)
                     uid_to_push = cust.get("line_uid", "") if cust else ""
                     if uid_to_push:
                         ready_msg = "您的訂單已備妥，歡迎來門市取貨 😊"
                         push_message(uid_to_push, ready_msg)
-                        print(f"[READY_NOTIFY] 已推播備貨通知 uid={uid_to_push[:12]}")
+                        log.info(f"[READY_NOTIFY] 已推播備貨通知 uid={uid_to_push[:12]}")
                 except Exception as e:
-                    print(f"[READY_NOTIFY_ERR] {e}")
+                    log.info(f"[READY_NOTIFY_ERR] {e}")
             _redis(["DEL", ready_key])
         from flask import redirect
         return redirect(f"/orders?token={token}&tab={tab}")
@@ -4978,7 +4991,7 @@ def orders_admin():
                         timeout=5,
                     )
                 except Exception as e:
-                    print(f"[DEL_ERR] {e}")
+                    log.info(f"[DEL_ERR] {e}")
             _redis(["DEL", del_key])
         from flask import redirect
         return redirect(f"/orders?token={token}&tab={tab}")
