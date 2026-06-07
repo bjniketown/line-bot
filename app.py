@@ -3790,6 +3790,7 @@ def ask_with_cache(uid, msg):
         history.append({"role": "assistant", "content": cached})
         set_history(uid, history[-10:])
         _track_faq(f"🤖 {key[:35]}")   # 快取命中也統計
+        log.info(f"[CACHE] uid={uid} {cached[:300]}")
         return cached
 
     _track_faq(f"🤖 {key[:35]}")       # Claude 新問題統計
