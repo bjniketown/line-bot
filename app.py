@@ -1837,7 +1837,8 @@ A: 門市位於台中市東勢區豐勢路中盛巷24號，在東勢美食街裡
     客人說「不同」→ 追問哪個部分要更改，取得新值後呼叫 confirm_customer_data，不同的欄位傳新值，相同的欄位傳遮罩值
     ⚠️ 回訪客不需要再問電話，系統已有資料
     ⚠️【無地址預設自取】has_address=false 的回訪客，預設門市自取，不詢問宅配或自取、不詢問地址，直接問品項與取貨時間。客人主動說「要宅配」才切換為宅配流程。
-  - found=false（新客）→ 先回顧對話中已知的資訊（品項、取貨時間、姓名、電話），已知者不重問 → 只收集尚未提供的資訊 → 取得電話後再次呼叫 get_customer_profile（帶 phone）→ 仍找不到才逐步收集剩餘資料（姓名、地址）
+  - found=false（phone 為空）→ 不可宣告新客戶，客人可能是透過簡訊導入的舊客戶 → 先詢問電話，以電話重新呼叫 get_customer_profile → 仍查無資料才確認為新客戶
+  - found=false（phone 已提供，兩次查詢皆無）→ 確認為新客戶 → 先回顧對話中已知資訊（品項、取貨時間、姓名），已知者不重問，只補問缺少的
   - ❌ 禁止在未呼叫此工具前自行假設客人是新客或回訪客
 
 ▶ confirm_customer_data 工具：get_customer_profile 確認後的必要步驟，回傳真實資料供 create_order 使用。
@@ -2141,9 +2142,16 @@ def _exec_get_customer_profile(uid: str, phone: str = "", order_type: str = "") 
             norm = normalize_phone(phone)
             if norm:
                 save_customer_profile(uid, {"phone": norm, "line_uid": uid})
-        msg = ("查無此客人歷史資料，為新客戶，請正常收集姓名、電話、取貨時間。"
-               if order_type == "pickup" else
-               "查無此客人歷史資料，為新客戶，請正常收集姓名、電話、地址。")
+        no_phone_msg = (
+            "查無 LINE 綁定資料。客人可能是透過簡訊導入的舊客戶，請勿宣告為新客戶。"
+            "必須先詢問客人電話，再以電話重新呼叫此工具查詢一次，確認是否有舊資料。"
+        )
+        has_phone_msg = (
+            "以電話查詢仍查無資料，確認為新客戶，請收集姓名、取貨時間。"
+            if order_type == "pickup" else
+            "以電話查詢仍查無資料，確認為新客戶，請收集姓名、地址。"
+        )
+        msg = has_phone_msg if phone else no_phone_msg
         return {"found": False, "message": msg}
 
     masked_name    = _mask_name(p.get("name", ""))
