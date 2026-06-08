@@ -3858,25 +3858,43 @@ def webhook():
                 reply(token, "您今日的詢問次數已達上限，請明天再試，或直撥 04-25882881 😊")
                 continue
 
-            # 所有訊息一律 debounce，等待分段訊息合併
-            raw = _redis(["GET", f"pending:{uid}"]) or "[]"
-            try:
-                pending = json.loads(raw)
-            except Exception:
-                pending = []
-            pending.append({"text": text, "token": token})
-            _redis(["SET", f"pending:{uid}", json.dumps(pending, ensure_ascii=False), "EX", 30])
-            seq = int(_redis(["INCR", f"debounce_seq:{uid}"]) or 1)
-            _redis(["EXPIRE", f"debounce_seq:{uid}", 30])
-            threading.Thread(target=_debounce_worker, args=(uid, seq), daemon=True).start()
+            # Rich menu 關鍵字才做 debounce；一般訊息直接處理
+            _RICH_MENU_KW = {
+                "豆干絲(真空包裝)", "油潑辣子", "香滷花生", "產品消息",
+                "天然昆布", "招牌豆干絲", "門市地址", "推薦好友", "我要訂購",
+            }
+            if text.strip() in _RICH_MENU_KW:
+                raw = _redis(["GET", f"pending:{uid}"]) or "[]"
+                try:
+                    pending = json.loads(raw)
+                except Exception:
+                    pending = []
+                pending.append({"text": text, "token": token})
+                _redis(["SET", f"pending:{uid}", json.dumps(pending, ensure_ascii=False), "EX", 30])
+                seq = int(_redis(["INCR", f"debounce_seq:{uid}"]) or 1)
+                _redis(["EXPIRE", f"debounce_seq:{uid}", 30])
+                threading.Thread(target=_debounce_worker, args=(uid, seq), daemon=True).start()
+            else:
+                # 一般訊息直接進 worker，不等待
+                # 若同一客人已有訊息在處理中（seq > 1），代表分段傳送，先推送提示
+                seq = int(_redis(["INCR", f"debounce_seq:{uid}"]) or 1)
+                _redis(["EXPIRE", f"debounce_seq:{uid}", 30])
+                # 5 秒內連續傳才視為分段；超過 5 秒是正常對話不警告
+                frag_key = f"frag_warn:{uid}"
+                is_frag = seq > 1 and _redis(["GET", frag_key]) is not None
+                _redis(["SET", frag_key, "1", "EX", 5])
+                if is_frag:
+                    push_message(uid, "煩請您將訊息整合，不要分段式傳送，我理解的較慢 🙏")
+                _redis(["SET", f"pending:{uid}", json.dumps([{"text": text, "token": token}], ensure_ascii=False), "EX", 30])
+                threading.Thread(target=_debounce_worker, args=(uid, seq, 0), daemon=True).start()
     return "OK"
 
 
 _DEBOUNCE_SECS = 2.0
 
-def _debounce_worker(uid: str, seq: int):
-    """等待 _DEBOUNCE_SECS 秒後，若序號未變則合併所有 pending 訊息一起處理。"""
-    time.sleep(_DEBOUNCE_SECS)
+def _debounce_worker(uid: str, seq: int, secs: float = _DEBOUNCE_SECS):
+    """等待 secs 秒後，若序號未變則合併所有 pending 訊息一起處理。"""
+    time.sleep(secs)
     current_seq = _redis(["GET", f"debounce_seq:{uid}"])
     if current_seq is None or int(current_seq) != seq:
         return  # 有新訊息進來，由新的 worker 負責
