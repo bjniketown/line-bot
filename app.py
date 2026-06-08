@@ -1905,16 +1905,6 @@ KEYWORD_RULES = [
      "・冷凍水餃（手工）→ 280 元／包（僅限門市自取）\n\n"
      "需要試算含運費的總價嗎？告訴我數量就好 😊"),
 
-    ("🚚 運費免運",
-     ["運費", "免運"],
-     "運費規則（每 50 包為一箱）：\n"
-     "・整箱（50 的倍數）→ 免運費 🎉\n"
-     "・餘數 1–38 包 → 加收 225 元\n"
-     "・餘數 39–49 包 → 加收 290 元\n\n"
-     "小提示：\n"
-     "訂 39–49 包 → 湊到 50 包更划算！\n"
-     "訂 89–99 包 → 湊到 100 包更划算！\n\n"
-     "需要試算嗎？請告訴我您的數量 😊"),
 
     ("📋 訂購方式",
      ["怎麼訂", "如何訂", "要怎麼訂", "要怎麼買", "要怎麼購買", "訂購方式", "下單方式"],
@@ -2670,10 +2660,7 @@ def quick_rule_reply(text, uid=None):
     # 訂單提交 / 付款確認 / 修改意圖 → 讓 Claude 依對話脈絡處理，不觸發關鍵字規則
     if any(kw in t for kw in ("收件人", "收件地址", "訂購數量", "訂購品項")):
         return None
-    if re.search(r'修改|更改|變更|改成|改為', t) and any(kw in t for kw in ("運費", "金額", "總計", "價格", "費用")):
-        return None
-    # 含數字的運費計算問題 → 讓 Claude 直接計算，不回通用規則
-    if "運費" in t and re.search(r'\d+', t):
+    if re.search(r'修改|更改|變更|改成|改為', t) and any(kw in t for kw in ("金額", "總計", "價格", "費用")):
         return None
     if ("末四碼" in t
             or re.search(r'已匯[款]?|匯好[了]?|付好[了]?|轉好[了]?|已付款?|付款完成', t)
@@ -2687,7 +2674,7 @@ def quick_rule_reply(text, uid=None):
        any(kw in t for kw in ("付款", "匯款", "轉帳", "帳號", "運費", "免運")):
         return None
     # 訊息含數字（詢問特定數量價格）→ 跳過罐頭回覆，讓 Claude 呼叫計算 tool
-    if re.search(r'\d+', t) and any(kw in t for kw in ("多少錢", "幾元", "幾塊", "運費", "免運", "試算", "算一下", "計算")):
+    if re.search(r'\d+', t) and any(kw in t for kw in ("多少錢", "幾元", "幾塊", "試算", "算一下", "計算")):
         return None
     # 關鍵字比對（先做，避免「運費」等2字關鍵字被2字規則誤攔）
     for label, keywords, reply_text in KEYWORD_RULES:
