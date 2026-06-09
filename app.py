@@ -3845,6 +3845,10 @@ def webhook():
             # ── 自動記錄客戶名單 ─────────────────────────────────────────────
             register_customer(uid)
 
+            # ── 總開關：暫停所有回覆 ──────────────────────────────────────
+            if _redis(["GET", "bot_paused"]):
+                continue
+
             # ── 人工接管：暫停該客戶的機器人回覆 ────────────────────────────
             if _redis(["GET", f"paused:{uid}"]):
                 continue
@@ -4108,6 +4112,12 @@ def store_admin():
     elif action == "busy_season_clear":
         clear_busy_season()
         return _redirect(token)
+    elif action == "bot_pause":
+        _redis(["SET", "bot_paused", "1"])
+        return _redirect(token)
+    elif action == "bot_resume":
+        _redis(["DEL", "bot_paused"])
+        return _redirect(token)
     store_msg  = store_status_text()
     dump_msg   = dumpling_soldout_text()
     chili_msg  = chili_soldout_text()
@@ -4115,6 +4125,10 @@ def store_admin():
     import json as _j
     fd_json    = _j.dumps(sorted(full_dates))
     bs_reason, bs_start, bs_end, bs_days = get_busy_season()
+
+    bot_paused = bool(_redis(["GET", "bot_paused"]))
+    bp_cls = "bg-r" if bot_paused else "bg-g"
+    bp_txt = "🔴 機器人已暫停回覆" if bot_paused else "🟢 機器人正常回覆"
 
     s_cls  = "bg-r" if store_msg  else "bg-g"
     s_txt  = "🔴 門市停單中" if store_msg else "🟢 正常接單"
@@ -4162,6 +4176,18 @@ def store_admin():
         "<div style='margin-bottom:16px'>"
         f"<a href='/report?token={token}' style='display:block;padding:12px;background:#2e7d32;color:#fff;border-radius:10px;text-align:center;text-decoration:none;font-size:14px'>📊 CRM 月報</a>"
         "</div>"
+
+        # ── 機器人總開關 ───────────────────────────────────────────────
+        "<div class='sec-t'>機器人回覆</div>"
+        "<div class='card'>"
+        "<div class='card-hd'>"
+        "<span class='card-nm'>目前狀態</span>"
+        f"<span class='badge {bp_cls}'>{bp_txt}</span>"
+        "</div>"
+        "<div class='card-bd'><div class='btn-row'>"
+        f"<a class='btn btn-r' href='/store?token={token}&action=bot_pause'>暫停回覆</a>"
+        f"<a class='btn btn-g' href='/store?token={token}&action=bot_resume'>恢復回覆</a>"
+        "</div></div></div>"
 
         # ── 門市接單 ──────────────────────────────────────────────────
         "<div class='sec-t'>門市接單</div>"
