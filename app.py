@@ -348,15 +348,36 @@ QR_CODE_URL = _fetch_qr_code_url()
 _TZ_TW    = timezone(timedelta(hours=8))
 _WEEKDAYS = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
 
+_HOLIDAYS_2026 = {
+    (1,  1): "元旦",
+    (2, 17): "春節初一",
+    (2, 18): "春節初二",
+    (2, 19): "春節初三",
+    (2, 28): "和平紀念日",
+    (4,  4): "兒童節",
+    (4,  5): "清明節",
+    (5,  1): "勞動節",
+    (6, 19): "端午節",
+    (8, 27): "中元節",
+    (9, 25): "中秋節",
+    (10, 10): "國慶日",
+    (12, 22): "冬至",
+    (12, 25): "行憲紀念日",
+}
+
 def current_date_text() -> str:
     now = datetime.now(_TZ_TW)
     base = (
         f"現在台灣時間：{now.strftime('%Y年%m月%d日')} "
         f"{_WEEKDAYS[now.weekday()]} {now.strftime('%H:%M')}"
     )
-    # 未來 30 天日期對照表，供 Claude 直接查詢，禁止自行推算星期
+    # 未來 60 天日期對照表，供 Claude 直接查詢，禁止自行推算星期
+    def _day_label(d):
+        wd = _WEEKDAYS[d.weekday()]
+        holiday = _HOLIDAYS_2026.get((d.month, d.day), "")
+        return f"{d.strftime('%m/%d')}({wd}{'/' + holiday if holiday else ''})"
     calendar = "【日期星期對照表，查表用，禁止自行推算】\n" + "  ".join(
-        f"{(now + timedelta(days=i)).strftime('%m/%d')}({_WEEKDAYS[(now + timedelta(days=i)).weekday()]})"
+        _day_label(now + timedelta(days=i))
         for i in range(1, 61)
     )
     # 台灣週次定義（強制使用）
