@@ -5480,7 +5480,7 @@ def report_admin():
             prev_repeat = sum(1 for p in prev["phones"] if p in oldest_phones)
         prev_repurchase = round(prev_repeat / len(prev["phones"]) * 100) if prev["phones"] else 0
 
-        # 沉睡客喚醒數：本月 updated_at 且有真實 line_uid + 之前有訂單
+        # 沉睡客喚醒數：本月綁定 UID 的舊客戶（created_at 在本月前）
         awakened = 0
         new_uid_customers = _supa_query("customers", [
             ("updated_at", f"gte.{start}"),
@@ -5488,11 +5488,8 @@ def report_admin():
             ("line_uid", "not.is.null"),
             ("line_uid", "not.like.line_%"),
         ])
-        cur_phones_set = set(cur["phones"])
-        older_phones2  = {o["phone"] for o in _supa_query("orders", [("created_at", f"lt.{start}")])}
         for c in new_uid_customers:
-            ph = c.get("phone", "")
-            if ph in cur_phones_set and ph in older_phones2:
+            if c.get("created_at", "") < start:
                 awakened += 1
 
         prev_awakened = 0  # 上月喚醒數也需同樣邏輯，簡化為 0（無歷史快取）
