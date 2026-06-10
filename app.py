@@ -5175,13 +5175,28 @@ def recent_admin():
     rows.sort(key=lambda r: r["last_time"], reverse=True)
     rows = rows[:10]
 
-    # 批次並行查 LINE 顯示名稱（threading 加速）
+    # 批次查 Supabase 取得所有 display_name（一次請求）
+    uid_to_name = {}
+    if rows and SUPABASE_URL:
+        try:
+            uid_list = ",".join(r["uid"] for r in rows)
+            resp = requests.get(
+                f"{SUPABASE_URL}/rest/v1/customers",
+                headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+                params={"line_uid": f"in.({uid_list})", "select": "line_uid,display_name,name"},
+                timeout=5,
+            )
+            if resp.ok:
+                for c in resp.json():
+                    uid_to_name[c["line_uid"]] = c.get("display_name") or c.get("name") or ""
+        except Exception:
+            pass
+
+    # 沒有 display_name 的才打 LINE API（通常極少）
     def _get_line_name(row: dict):
         uid = row["uid"]
-        # 先查 Supabase customers 有無已存的 display_name
-        p = get_customer_profile(uid)
-        if p and p.get("display_name"):
-            row["name"] = p["display_name"]
+        if uid_to_name.get(uid):
+            row["name"] = uid_to_name[uid]
             return
         try:
             r = requests.get(
@@ -5196,9 +5211,14 @@ def recent_admin():
             pass
         row["name"] = uid
 
-    threads = [threading.Thread(target=_get_line_name, args=(row,)) for row in rows]
-    for t in threads: t.start()
-    for t in threads: t.join(timeout=6)
+    missing = [row for row in rows if not uid_to_name.get(row["uid"])]
+    if missing:
+        threads = [threading.Thread(target=_get_line_name, args=(row,)) for row in missing]
+        for t in threads: t.start()
+        for t in threads: t.join(timeout=6)
+    for row in rows:
+        if "name" not in row:
+            row["name"] = uid_to_name.get(row["uid"], row["uid"])
 
     # 手動搜尋（電話或 UID）
     search_q = request.args.get("search", "").strip()
