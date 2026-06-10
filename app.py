@@ -5579,7 +5579,7 @@ def report_admin():
              f"上月 {prr}%") +
         card("沉睡客喚醒", f"{awk} 人",
              arrow(awk, data['prev_awakened']),
-             "本月綁定UID且有訂單的舊客")
+             "本月綁定UID的舊客戶")
     )
 
     return (
