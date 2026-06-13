@@ -3620,7 +3620,7 @@ def ask(uid, msg):
     if raw is None:
         return "哎呀，剛才網路有點小狀況 😅 沒能接收到您的訊息，麻煩再傳一次訊息給我，馬上為您服務！", False
 
-    log.info(f"[RAW] uid={uid} {raw[:300]}")
+    log.info(f"[RAW] uid={uid} {raw}")
 
     # ── 金額攔截：Claude 報了結論性金額但沒呼叫 calc 工具 → 強制重問 ──────
     # 只攔截結論性金額字眼（總金額、免運費等），不攔截單價介紹（70元/包）
