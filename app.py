@@ -3878,7 +3878,7 @@ def webhook():
             text  = e["message"]["text"]
             token = e["replyToken"]
             uid   = e["source"]["userId"]
-            log.info(f"[MSG] {datetime.now(_TZ_TW).strftime('%Y-%m-%d %H:%M:%S')} uid={uid} msg={text[:50]}")
+            log.info(f"[MSG] {datetime.now(_TZ_TW).strftime('%Y-%m-%d %H:%M:%S')} uid={uid} msg={text[:80].replace(chr(10), '↵')}")
             # ── 自動記錄客戶名單 ─────────────────────────────────────────────
             register_customer(uid)
 
@@ -3968,7 +3968,7 @@ def _debounce_worker(uid: str, seq: int, secs: float = _DEBOUNCE_SECS):
     _redis(["DEL", f"debounce_seq:{uid}"])
     last_token = pending[-1]["token"]
     combined_text = "\n".join(p["text"] for p in pending)
-    log.info(f"[DEBOUNCE] uid={uid} merged={len(pending)}則 text={combined_text[:80]}")
+    log.info(f"[DEBOUNCE] uid={uid} merged={len(pending)}則 text={combined_text[:120].replace(chr(10), '↵')}")
     # 合併後先檢查 keyword rules，命中則直接回覆，不呼叫 Claude
     rule = quick_rule_reply(combined_text, uid)
     if rule:
