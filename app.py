@@ -878,7 +878,7 @@ _BANK_INFO = (
 
 def _exec_create_order(uid: str, confirmed_name: str, confirmed_phone: str, confirmed_address: str,
                        items: str, ship_date: str, total: int, shipping: int,
-                       modify: bool = False) -> dict:
+                       order_notes: str = "", modify: bool = False) -> dict:
     """建立宅配訂單：驗證資料、寫入 Redis+Supabase、回傳確認訊息。
     confirmed_name/confirmed_phone/confirmed_address 必須來自 confirm_customer_data 工具。"""
     if not confirmed_name or not confirmed_name.strip():
@@ -916,8 +916,9 @@ def _exec_create_order(uid: str, confirmed_name: str, confirmed_phone: str, conf
     recv_obj = datetime.strptime(recv_date, "%Y-%m-%d")
     recv_weekday = weekday_names[recv_obj.weekday()]
     # 寫入訂單
-    order_info = f"{confirmed_name}|{norm_phone}|{confirmed_address}|{items}|{ship_date}"
-    reply_text = f"宅配訂單 {items} 總金額 {total:,} 元"
+    items_with_notes = items + (f"\n備註：{order_notes}" if order_notes else "")
+    order_info = f"{confirmed_name}|{norm_phone}|{confirmed_address}|{items_with_notes}|{ship_date}"
+    reply_text = f"宅配訂單 {items_with_notes} 總金額 {total:,} 元"
     _save_order_record("order", order_info, reply_text, uid=uid, modify=modify, total=total)
     # 儲存客戶資料
     save_customer_profile(uid, {"name": confirmed_name, "phone": norm_phone, "address": confirmed_address, "line_uid": uid})
@@ -925,7 +926,7 @@ def _exec_create_order(uid: str, confirmed_name: str, confirmed_phone: str, conf
     shipping_note = "免運費 🎉" if shipping == 0 else f"運費 {shipping:,} 元"
     confirm_msg = (
         f"✅ 訂單已成立！\n\n"
-        f"**訂單明細**\n{items}\n{shipping_note}\n\n"
+        f"**訂單明細**\n{items_with_notes}\n{shipping_note}\n\n"
         f"**出貨資訊**\n"
         f"・出貨日：{ship_weekday} {ship_date}\n"
         f"・預計收件：{recv_weekday} {recv_date}\n\n"
@@ -941,7 +942,7 @@ def _exec_create_order(uid: str, confirmed_name: str, confirmed_phone: str, conf
 
 def _exec_create_pickup(uid: str, confirmed_name: str, confirmed_phone: str,
                         pickup_datetime: str, items: str, total: int,
-                        sauce_note: str = "", modify: bool = False) -> dict:
+                        sauce_note: str = "", order_notes: str = "", modify: bool = False) -> dict:
     """建立門市自取訂單：驗證資料、寫入 Redis+Supabase、回傳確認訊息。
     confirmed_name/confirmed_phone 必須來自 confirm_customer_data 工具。
     total 與 sauce_note 必須來自 calc_pickup 工具的回傳值。"""
@@ -967,14 +968,15 @@ def _exec_create_pickup(uid: str, confirmed_name: str, confirmed_phone: str,
     except ValueError:
         return {"success": False, "error": f"取貨時間格式錯誤：{pickup_datetime}"}
     # 寫入訂單
-    order_info = f"{confirmed_name}|{norm_phone}|{pickup_datetime}|{items}"
-    reply_text = f"自取訂單 {items} 總金額 {total:,} 元"
+    items_with_notes = items + (f"\n備註：{order_notes}" if order_notes else "")
+    order_info = f"{confirmed_name}|{norm_phone}|{pickup_datetime}|{items_with_notes}"
+    reply_text = f"自取訂單 {items_with_notes} 總金額 {total:,} 元"
     _save_order_record("pickup", order_info, reply_text, uid=uid, modify=modify, total=total)
     save_customer_profile(uid, {"name": confirmed_name, "phone": norm_phone, "line_uid": uid})
     set_has_order(uid)
     confirm_msg = (
         f"✅ 自取訂單已成立！\n\n"
-        f"**訂單明細**\n{items}\n\n"
+        f"**訂單明細**\n{items_with_notes}\n\n"
         f"**取貨資訊**\n"
         f"・取貨時間：{pickup_weekday} {pickup_datetime}\n"
         f"・姓名：{confirmed_name}\n"
@@ -1540,7 +1542,9 @@ A: 這是依據食品法規的規定——生食與熟食不可共同放在同�
 
 
 Q: 昆布、花生的醬料怎麼包？
-A: 天然昆布和香滷花生不附蔥花、蒜泥，只有辣油可以另外獨立包裝。
+A: 天然昆布和香滷花生不附蔥花、蒜泥。醬料依包裝大小不同：
+   - 100 元/份：自動附一包辣油（獨立包裝）
+   - 50 元/份：若客人需要辣油，直接加入包裝（非獨立包裝）
 
 Q: 豆干絲、昆布、花生素食可以吃嗎？
 A: 可以！豆干絲、天然昆布、香滷花生皆為純素食，素食者放心食用。
@@ -1782,6 +1786,10 @@ A: 老鄰居豆干絲由詹媽媽（第一代經營者）於 2000 年 921 大地
       - 客人購買一般包裝 3 包時，主動告知「4 包以上醬料獨立包裝，方便保存，是否要多帶一包？」
       - ⚠️ 說明醬料規則時，必須依照客人實際訂購數量套用正確規則。訂購 10 包→套用「4 包以上」規則，絕對不可套用「1–3 包」規則。
     ▸ 真空包裝（固定）：本身即真空封裝，附蒜泥水＋辣油調料包，不附蔥花（食品法規），無論幾包規則相同
+    ▸ 【昆布／花生醬料規則】不附蔥花、蒜泥。
+      - 100 元/份：自動附一包辣油（獨立包裝）
+      - 50 元/份：若客人要辣油，直接加入包裝（非獨立）
+    ▸ 【多要辣油包】每包豆干絲本身即附一包辣油；每份 100 元昆布／花生亦附一包辣油。客人若要求「多要幾包辣油」，婉轉告知無法額外提供；若有需要，可購買店內零售的油潑辣子（250ml/罐，120元）。⚠️ 絕對不可把「多要辣油包」解讀為訂購油潑辣子產品並加入訂單。
 19. 【訂單追加／修改 — 嚴格執行】
   ⚠️ 訂單已成立後，只要客人說任何變動意圖，必須判斷是「修改」還是「新增」：
   【修改現有訂單】觸發詞：「改成」「換成」「改時間」「改日期」「改地址」「改品項」「追加」「再加」「多加」「修改」「取消那個改」「不要了改」
@@ -1851,6 +1859,7 @@ A: 老鄰居豆干絲由詹媽媽（第一代經營者）於 2000 年 921 大地
   - 違反以上任一條，傳入工具的日期將錯誤，導致客人困惑與業主介入。
   ① validate_pickup_time：驗證取貨時間是否在營業時間內
   ② calc_pickup：計算金額，取得 total 與 sauce_note。⚠️ 呼叫前回顧客人提到的所有品項，每一種都放入 items，不可遺漏任何一項。
+  ⚠️【訂單備註 order_notes】客人若提到葷素區分（如「12葷+3素」「全素」）、不要辣、其他特殊需求，必須填入 create_pickup 或 create_order 的 order_notes 欄位；無特殊需求則留空字串。
   ③ **立即呼叫 create_pickup 建立訂單**，不需等客人說「確認」
   ⚠️ 跳過 calc_pickup 直接呼叫 create_pickup 是嚴重錯誤，total 與 sauce_note 將無從取得。
   ⚠️ 即使 sauce_note 含有「建議多買 1 包」等提示，也必須先建立訂單，再把 sauce_note 附在訂單確認訊息後方。不可因 sauce_note 的建議而中斷流程等待客人確認。
@@ -3209,10 +3218,11 @@ TOOLS = [
                 "confirmed_name":    {"type": "string",  "description": "收件人姓名，必須來自 confirm_customer_data 回傳的 confirmed_name"},
                 "confirmed_phone":   {"type": "string",  "description": "聯絡電話，必須來自 confirm_customer_data 回傳的 confirmed_phone"},
                 "confirmed_address": {"type": "string",  "description": "收件地址，必須來自 confirm_customer_data 回傳的 confirmed_address"},
-                "items":     {"type": "string",  "description": "品項簡述，例：豆干絲50包"},
-                "ship_date": {"type": "string",  "description": "出貨日期 YYYY-MM-DD"},
-                "total":     {"type": "integer", "description": "總金額（含運費），必須來自 calc_delivery 回傳的 total"},
-                "shipping":  {"type": "integer", "description": "運費金額，必須來自 calc_delivery 回傳的 shipping，免運填 0"},
+                "items":       {"type": "string",  "description": "品項簡述，例：豆干絲50包"},
+                "ship_date":   {"type": "string",  "description": "出貨日期 YYYY-MM-DD"},
+                "total":       {"type": "integer", "description": "總金額（含運費），必須來自 calc_delivery 回傳的 total"},
+                "shipping":    {"type": "integer", "description": "運費金額，必須來自 calc_delivery 回傳的 shipping，免運填 0"},
+                "order_notes": {"type": "string",  "description": "訂單備註（選填）：客人指定的特殊需求，例如「12葷+3素」「全素」「不要辣」等，不填則留空字串"},
             },
             "required": ["confirmed_name", "confirmed_phone", "confirmed_address", "items", "ship_date", "total", "shipping"],
         },
@@ -3235,6 +3245,7 @@ TOOLS = [
                 "items":           {"type": "string",  "description": "品項簡述（來自 calc_pickup 的 detail 內容）"},
                 "total":           {"type": "integer", "description": "總金額，必須來自 calc_pickup 回傳的 total"},
                 "sauce_note":      {"type": "string",  "description": "醬料說明，必須來自 calc_pickup 回傳的 sauce_note，無則填空字串"},
+                "order_notes":     {"type": "string",  "description": "訂單備註（選填）：客人指定的特殊需求，例如「12葷+3素」「全素」「不要辣」等，不填則留空字串"},
             },
             "required": ["confirmed_name", "confirmed_phone", "pickup_datetime", "items", "total", "sauce_note"],
         },
@@ -3344,6 +3355,7 @@ def _call_claude(history: list, uid: str = "") -> tuple:
                             ship_date=block.input.get("ship_date", ""),
                             total=int(block.input.get("total", 0)),
                             shipping=int(block.input.get("shipping", 0)),
+                            order_notes=block.input.get("order_notes", ""),
                         )
                         tool_order_created = True
                     elif block.name == "create_pickup":
@@ -3355,6 +3367,7 @@ def _call_claude(history: list, uid: str = "") -> tuple:
                             items=block.input.get("items", ""),
                             total=int(block.input.get("total", 0)),
                             sauce_note=block.input.get("sauce_note", ""),
+                            order_notes=block.input.get("order_notes", ""),
                         )
                         tool_order_created = True
                     elif block.name == "check_ship_date":
